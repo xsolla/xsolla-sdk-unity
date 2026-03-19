@@ -235,6 +235,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     private static boolean emailCollectionConsentOptIn = false;
 
+    private static boolean queryCancellationReasonEnabled = false;
+
     @Nullable
     private static String webshopUrl = null;
 
@@ -330,7 +332,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .orElse(false);
 
         emailCollectionConsentOptIn = maybeSettingsJson
-            .map(settingsJson -> settingsJson.optBoolean("emailCollectionConsentOptIn"))
+            .map(settingsJson -> settingsJson.optBoolean("emailCollectionConsentOptInEnabled"))
             .orElse(false);
 
         webshopUrl = maybeSettingsJson
@@ -441,6 +443,10 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 JsonHelper.jsonToBoolean(advancedSettings, "fallbackToFirstAvailableTWAProvider")
             );
 
+        queryCancellationReasonEnabled = maybeAdvancedSettings
+            .map(advancedSettings -> advancedSettings.optBoolean("queryCancellationReasonEnabled"))
+            .orElse(false);
+
         logDebug("Initialize: " + argsJson);
         logDebug("SimpleMode: " + simpleMode);
         logDebug("UseBuyButtonSolution: " + useBuyButtonSolution);
@@ -451,6 +457,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         logDebug("FetchPersonalizedProductsOnly: " + fetchPersonalizedProductsOnly);
         logDebug("TrackingId: " + (trackingId != null ? trackingId : "N/A"));
         logDebug("FetchProductsWithGeoLocale: " + fetchProductsWithGeoLocale);
+        logDebug("QueryCancellationReasonEnabled: " + queryCancellationReasonEnabled);
 //      logDebug("InvokePurchasesUpdatedIfOrderIdMissing: " + fetchProductsWithGeoLocale);
         logDebug("AdditionalSettings: " + maybeAdditionalSettingsJson.orElse(null));
 
@@ -565,6 +572,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                             .withActivity(newActivity)
                             .withBuyButtonSolutionEnabled(useBuyButtonSolution)
                             .withEmailCollectionConsentOptInEnabled(emailCollectionConsentOptIn)
+                            .withQueryCancellationReasonEnabled(queryCancellationReasonEnabled)
                             .withEventListeners(eventListeners)
                             .withDomainOverrideConfig(domainOverrideConfig);
                     })

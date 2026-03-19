@@ -1,3 +1,18 @@
+## [3.1.4] - 2026-17-03
+
+### Changed
+
+- iOS: replaced bundled framework with Swift Package Manager dependency resolution
+- Android: updated SDK to `3.0.37` (cancellation reason querying, invoice status check fix)
+
+### Added
+
+- Android: Added `queryCancellationReasonEnabled` setting to `AdvancedSettingsAndroid` to distinguish between user cancellations and failed payments
+
+### Fixed
+
+- Android: Fixed `emailCollectionConsentOptInEnabled` not being passed
+
 ## [3.1.3] - 2026-13-03
 
 ### Changed

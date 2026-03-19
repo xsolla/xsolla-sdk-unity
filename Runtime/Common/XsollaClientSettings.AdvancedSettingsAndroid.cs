@@ -26,6 +26,16 @@ namespace Xsolla.SDK.Common
             public bool fallbackToFirstAvailableTWAProvider;
 
             /// <summary>
+            /// When enabled, the purchase error callback distinguishes between a user closing
+            /// the payment screen without paying and a payment that was attempted but failed
+            /// (reported as an error, not a cancellation).
+            /// When disabled, both cases are reported as cancellations.
+            /// <para/>
+            /// Off by default.
+            /// </summary>
+            public bool queryCancellationReasonEnabled;
+
+            /// <summary>
             /// Sets a set of providers that need to be excluded from being used by the
             /// SDK when opening a custom tab or a trusted web activity.
             /// <para/>
@@ -106,6 +116,19 @@ namespace Xsolla.SDK.Common
             public AdvancedSettingsAndroid SetFallbackToFirstAvailableTWAProvider(bool fallbackToFirstAvailableTWAProvider)
             {
                 this.fallbackToFirstAvailableTWAProvider = fallbackToFirstAvailableTWAProvider;
+                return this;
+            }
+            /// <summary>
+            /// Enables distinguishing between a user closing the payment screen without paying
+            /// and a payment that was attempted but failed (reported as an error, not a cancellation).
+            /// When disabled, both cases are reported as cancellations.
+            /// <para/>
+            /// Off by default.
+            /// </summary>
+            /// <param name="queryCancellationReasonEnabled">True to distinguish failed payments from user cancellations.</param>
+            public AdvancedSettingsAndroid SetQueryCancellationReasonEnabled(bool queryCancellationReasonEnabled)
+            {
+                this.queryCancellationReasonEnabled = queryCancellationReasonEnabled;
                 return this;
             }
         }

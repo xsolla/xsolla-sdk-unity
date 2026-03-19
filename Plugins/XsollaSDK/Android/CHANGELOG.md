@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.37] - 17-03-2026
+
+### Added
+
+- Added optional cancellation reason querying (`ConfigWithoutIntegration.Payments::withQueryCancellationReasonEnabled`) to distinguish between clean cancels and failed payments
+
+### Fixed
+
+- Fixed token-based billing flow not checking invoice status after activity result
+
 ## [3.0.36] - 12-03-2026
 
 ### Changed

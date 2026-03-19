@@ -1403,6 +1403,6 @@ extern "C"
     void _XsollaUnityBridgeCancelTransaction() {
         XsollaUnityLog(SKLogLevelVerbose, @"_XsollaUnityBridgeCancelTransaction");
         
-        [[SKPaymentQueue defaultQueue] cancelTransaction];
+        BOOL wasCancelled = [[SKPaymentQueue defaultQueue] cancelTransaction];
     }
 }
