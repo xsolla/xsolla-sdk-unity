@@ -36,6 +36,17 @@ namespace Xsolla.SDK.Common
             public bool queryCancellationReasonEnabled;
 
             /// <summary>
+            /// When enabled, if the app is killed during a payment flow in an external browser,
+            /// tapping "Back to Game" in PayStation relaunches the app from its main launcher
+            /// activity instead of silently failing.
+            /// <para/>
+            /// Requires <see cref="WebViewType.External"/>.
+            /// <para/>
+            /// Off by default.
+            /// </summary>
+            public bool redirectAppRelaunchEnabled;
+
+            /// <summary>
             /// Sets a set of providers that need to be excluded from being used by the
             /// SDK when opening a custom tab or a trusted web activity.
             /// <para/>
@@ -129,6 +140,22 @@ namespace Xsolla.SDK.Common
             public AdvancedSettingsAndroid SetQueryCancellationReasonEnabled(bool queryCancellationReasonEnabled)
             {
                 this.queryCancellationReasonEnabled = queryCancellationReasonEnabled;
+                return this;
+            }
+
+            /// <summary>
+            /// Enables app relaunch from PayStation redirect on cold start.
+            /// When the app is killed during a payment flow in an external browser,
+            /// tapping "Back to Game" in PayStation relaunches the app instead of silently failing.
+            /// <para/>
+            /// Requires <see cref="WebViewType.External"/>.
+            /// <para/>
+            /// Off by default.
+            /// </summary>
+            /// <param name="redirectAppRelaunchEnabled">True to enable app relaunch on cold-start redirect.</param>
+            public AdvancedSettingsAndroid SetRedirectAppRelaunchEnabled(bool redirectAppRelaunchEnabled)
+            {
+                this.redirectAppRelaunchEnabled = redirectAppRelaunchEnabled;
                 return this;
             }
         }

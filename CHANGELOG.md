@@ -1,3 +1,25 @@
+## [3.1.5] - 2026-24-03
+
+### Changed
+
+- Android: updated SDK to `3.0.38` (PayStation redirect app relaunch on cold start)
+
+### Added
+
+- Android: Added `redirectAppRelaunchEnabled` setting to `AdvancedSettingsAndroid` — when enabled and using an external browser for payments, tapping "Back to Game" in PayStation relaunches the app if it was killed during the payment flow
+- Android: Added post-merge manifest fix to ensure `PaymentRedirectActivity` intent filter is correctly applied regardless of manifest merge order
+- Android: Added discount percentage to product data
+- Android: Added developer payload to purchase response data
+
+### Fixed
+
+- WebGL: Fixed cancel handler delegate leak in PayStation order tracking
+- Android: Fixed inverted purchase state logic — purchased items were reported as pending
+- Android: Fixed NPE when PayStation UI settings are not configured
+- Android: Fixed invalid JSON in purchase restore bypass path
+- Android: Fixed floating-point precision loss in product price serialization
+- Standalone: Fixed malformed URL when using custom PayStation domain
+
 ## [3.1.4] - 2026-17-03
 
 ### Changed

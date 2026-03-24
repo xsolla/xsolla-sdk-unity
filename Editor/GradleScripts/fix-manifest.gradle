@@ -1,5 +1,8 @@
-// Xsolla Unity Plugin - Manifest Optimization
-// Removes unnecessary startup initializer to improve app launch performance.
+// Xsolla Unity Plugin - Post-merge manifest fixes.
+//
+// Unity's manifest merge order is unpredictable. AAR-level tools: directives
+// may or may not win depending on dependency resolution order. This script
+// runs after the merge and deterministically applies all required fixes.
 
 afterEvaluate {
     android.applicationVariants.all { variant ->
@@ -12,18 +15,27 @@ afterEvaluate {
                     def manifestFile = findManifest(variant)
 
                     if (!manifestFile) {
-                        println "[Xsolla] Manifest file not found for ${variant.name}, skipping optimization."
+                        println "[Xsolla] Manifest file not found for ${variant.name}, skipping fixes."
                         return
                     }
 
-                    if (!manifestFile.text.contains('PayStationCacheInitializer')) {
-	                    println "[Xsolla] No need to optimize the manifest."
-                        return
-                    }
+                    def manifest = new XmlSlurper(false, false).parseText(manifestFile.text)
+                    def changed = false
 
-                    removeInitializer(manifestFile, variant.name)
+                    changed |= removePayStationCacheInitializer(manifest)
+                    changed |= removeRedirectActivityIntentFilters(manifest)
+
+                    if (changed) {
+                        def serialized = groovy.xml.XmlUtil.serialize(
+                            new groovy.xml.StreamingMarkupBuilder().bind { mkp.yield manifest }
+                        )
+                        manifestFile.text = serialized
+                        println "[Xsolla] Manifest fixed for ${variant.name} build."
+                    } else {
+                        println "[Xsolla] Manifest for ${variant.name} needs no fixes."
+                    }
                 } catch (Exception e) {
-                    println "[Xsolla] Warning: Could not optimize manifest for ${variant.name}: ${e.message}"
+                    println "[Xsolla] Warning: Could not fix manifest for ${variant.name}: ${e.message}"
                 }
             }
         }
@@ -45,8 +57,9 @@ def findManifest(variant) {
     return null
 }
 
-def removeInitializer(manifestFile, variantName) {
-    def manifest = new XmlSlurper(false, false).parseText(manifestFile.text)
+// Removes PayStationCacheInitializer from the startup InitializationProvider
+// to avoid unnecessary work at app launch.
+def removePayStationCacheInitializer(manifest) {
     def removed = false
 
     manifest.application.provider.each { provider ->
@@ -61,10 +74,31 @@ def removeInitializer(manifestFile, variantName) {
     }
 
     if (removed) {
-        def serialized = groovy.xml.XmlUtil.serialize(
-            new groovy.xml.StreamingMarkupBuilder().bind { mkp.yield manifest }
-        )
-        manifestFile.text = serialized
-        println "[Xsolla] Manifest optimized for ${variantName} build."
+        println "[Xsolla]   - Removed PayStationCacheInitializer"
     }
+
+    return removed
+}
+
+// Strips intent filters from ActivityPayStationRedirect so that only
+// PaymentRedirectActivity handles the app://xpayment.* deep link.
+// The AAR's tools:node="removeAll" should do this during merge, but
+// Unity's merge order is not guaranteed.
+def removeRedirectActivityIntentFilters(manifest) {
+    def removed = false
+
+    manifest.application.activity.each { activity ->
+        if (activity.'@android:name'.text().endsWith('ActivityPayStationRedirect')) {
+            activity.'intent-filter'.each {
+                it.replaceNode {}
+                removed = true
+            }
+        }
+    }
+
+    if (removed) {
+        println "[Xsolla]   - Removed intent filters from ActivityPayStationRedirect"
+    }
+
+    return removed
 }

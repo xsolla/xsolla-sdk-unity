@@ -7,24 +7,26 @@ namespace Xsolla.Core
 		private bool isCancelByUser;
 		private Action handleOK;
 		private Action handleCancel;
-		
+		private Action _cancelHandlerWrapper;
+
 		public void Start(Action onOk, Action onCancel)
 		{
 			handleOK = onOk;
 			handleCancel = onCancel;
-			
+
 			XsollaWebCallbacks.AddPaymentStatusUpdateHandler(handleOK);
-			XsollaWebCallbacks.AddPaymentCancelHandler(() =>
+			_cancelHandlerWrapper = () =>
 			{
 				isCancelByUser = true;
 				handleCancel?.Invoke();
-			});
+			};
+			XsollaWebCallbacks.AddPaymentCancelHandler(_cancelHandlerWrapper);
 		}
 
 		public void Stop()
 		{
 			XsollaWebCallbacks.RemovePaymentStatusUpdateHandler(handleOK);
-			XsollaWebCallbacks.RemovePaymentCancelHandler(handleCancel);
+			XsollaWebCallbacks.RemovePaymentCancelHandler(_cancelHandlerWrapper);
 			XsollaWebBrowserHandlerWebGL.ClosePayStation(isCancelByUser);
 		}
 	}

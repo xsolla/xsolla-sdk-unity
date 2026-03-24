@@ -66,7 +66,7 @@ namespace Xsolla.Core
 	        var customHost = GetPaystationCustomHost(settings, isSandbox);
 	        
 	        if (!string.IsNullOrEmpty(customHost))
-		        return customHost;
+		        return customHost.TrimEnd('/') + "/";
 	        
 	        return $"https://{prefix}secure.xsolla.com/";
 	    }

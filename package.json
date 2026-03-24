@@ -8,7 +8,7 @@
         "url": "https://xsolla.com/partner-support"
     },
     "unity": "2022.3",
-    "version": "3.1.4",
+    "version": "3.1.5",
     "dependencies": {
         "com.unity.purchasing": "4.13.0",
         "com.unity.nuget.newtonsoft-json": "2.0.0"

@@ -74,22 +74,22 @@ namespace Xsolla.SDK.Store
         /// <summary>Currency ISO code.</summary>
         public string currency = "";
 
-        /// <summary>Price in micros.</summary>
+        /// <summary>Base price in micros (before discount). Same as <see cref="priceWithoutDiscount"/>.</summary>
         public long price = 0;
 
-        /// <summary>Formatted price string.</summary>
+        /// <summary>Formatted base price string (before discount).</summary>
         public string formattedPrice = "";
 
-        /// <summary>Discounted price in micros.</summary>
+        /// <summary>Final price in micros after all discounts applied.</summary>
         public long priceWithDiscount = 0;
 
-        /// <summary>Formatted discounted price string.</summary>
+        /// <summary>Formatted final price string after discounts.</summary>
         public string formattedPriceWithDiscount = "";
-        
-        /// <summary>Price in micros.</summary>
+
+        /// <summary>Base price in micros (before discount). Same as <see cref="price"/>.</summary>
         public long priceWithoutDiscount = 0;
 
-        /// <summary>Formatted price string.</summary>
+        /// <summary>Formatted base price string (before discount).</summary>
         public string formattedPriceWithoutDiscount = "";
 
        /// <summary>Discount percentage string.</summary>

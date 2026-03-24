@@ -766,27 +766,45 @@ namespace Xsolla.SDK.Store
             settings.DesktopRedirectPolicySettings.Delay = configuration.settings.redirectSettings.redirectDelay;
 
             if (configuration.settings.uiSettings.themeStyle == XsollaClientSettings.ThemeStyle.Custom)
-                settings.DesktopPayStationUISettings.paystationThemeId =
-                    configuration.settings.uiSettings.customTheme;
+            {
+                settings.DesktopPayStationUISettings.paystationThemeId = configuration.settings.uiSettings.customTheme;
+                settings.WebglPayStationUISettings.paystationThemeId = configuration.settings.uiSettings.customTheme;
+            }
             else if (configuration.settings.uiSettings.themeStyle == XsollaClientSettings.ThemeStyle.Dark)
+            {
                 settings.DesktopPayStationUISettings.paystationThemeId = "63295aab2e47fab76f7708e3";
+                settings.WebglPayStationUISettings.paystationThemeId = "63295aab2e47fab76f7708e3";
+            }
             else if (configuration.settings.uiSettings.themeStyle == XsollaClientSettings.ThemeStyle.Light)
+            {
                 settings.DesktopPayStationUISettings.paystationThemeId = "63295a9a2e47fab76f7708e1";
+                settings.WebglPayStationUISettings.paystationThemeId = "63295a9a2e47fab76f7708e1";
+            }
 
             if (configuration.settings.uiSettings.themeSize != XsollaClientSettings.ThemeSize.Auto)
-                settings.DesktopPayStationUISettings.size =
-                    configuration.settings.uiSettings.themeSize.ToString().ToLowerInvariant();
+            {
+                settings.DesktopPayStationUISettings.size = configuration.settings.uiSettings.themeSize.ToString().ToLowerInvariant();
+                settings.WebglPayStationUISettings.size = configuration.settings.uiSettings.themeSize.ToString().ToLowerInvariant();
+            }
 
             if (configuration.settings.closeButton != XsollaClientSettings.CloseButton.Auto)
+            {
                 settings.DesktopPayStationUISettings.showCloseButton =
                     configuration.settings.closeButton == XsollaClientSettings.CloseButton.Show;
+                settings.WebglPayStationUISettings.showCloseButton =
+                    configuration.settings.closeButton == XsollaClientSettings.CloseButton.Show;
+            }
             
             if (!string.IsNullOrEmpty(configuration.accessToken))
                 settings.XsollaToken.Create(configuration.accessToken, isBasedOnDeviceId: false);
 
             if (configuration.settings.uiSettings.visibleLogo != XsollaClientSettings.VisibleLogo.Auto)
+            {
                 settings.DesktopPayStationUISettings.visibleLogo =
                     configuration.settings.uiSettings.visibleLogo == XsollaClientSettings.VisibleLogo.Show;
+                settings.WebglPayStationUISettings.visibleLogo =
+                    configuration.settings.uiSettings.visibleLogo == XsollaClientSettings.VisibleLogo.Show;
+            }
 
             settings.CustomPayStationDomainProduction = configuration.customPayStationDomainProduction;
             settings.CustomPayStationDomainSandbox = configuration.customPayStationDomainSandbox;

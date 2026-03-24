@@ -237,6 +237,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     private static boolean queryCancellationReasonEnabled = false;
 
+    private static boolean redirectAppRelaunchEnabled = false;
+
     @Nullable
     private static String webshopUrl = null;
 
@@ -447,6 +449,10 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .map(advancedSettings -> advancedSettings.optBoolean("queryCancellationReasonEnabled"))
             .orElse(false);
 
+        redirectAppRelaunchEnabled = maybeAdvancedSettings
+            .map(advancedSettings -> advancedSettings.optBoolean("redirectAppRelaunchEnabled"))
+            .orElse(false);
+
         logDebug("Initialize: " + argsJson);
         logDebug("SimpleMode: " + simpleMode);
         logDebug("UseBuyButtonSolution: " + useBuyButtonSolution);
@@ -458,6 +464,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         logDebug("TrackingId: " + (trackingId != null ? trackingId : "N/A"));
         logDebug("FetchProductsWithGeoLocale: " + fetchProductsWithGeoLocale);
         logDebug("QueryCancellationReasonEnabled: " + queryCancellationReasonEnabled);
+        logDebug("RedirectAppRelaunchEnabled: " + redirectAppRelaunchEnabled);
 //      logDebug("InvokePurchasesUpdatedIfOrderIdMissing: " + fetchProductsWithGeoLocale);
         logDebug("AdditionalSettings: " + maybeAdditionalSettingsJson.orElse(null));
 
@@ -573,6 +580,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                             .withBuyButtonSolutionEnabled(useBuyButtonSolution)
                             .withEmailCollectionConsentOptInEnabled(emailCollectionConsentOptIn)
                             .withQueryCancellationReasonEnabled(queryCancellationReasonEnabled)
+                            .withRedirectAppRelaunch(redirectAppRelaunchEnabled)
                             .withEventListeners(eventListeners)
                             .withDomainOverrideConfig(domainOverrideConfig);
                     })
@@ -609,7 +617,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
         if (!useRestore) { // ignore restore
 
-            callback.onSuccess("{purchases: []}");
+            callback.onSuccess("{\"purchases\": []}");
             return;
         }
 
@@ -1763,7 +1771,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     .map(uiSettingsJson ->
                         uiSettingsJson.optString("visibleLogo").toLowerCase()
                     )
-                    .orElse(null);
+                    .orElse("auto");
 
                 switch (visibleLogo) {
                     case "show":
@@ -2047,17 +2055,19 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     .put("sku", product.getProductId())
                     .put("title", product.getTitle())
                     .put("description", product.getDescription())
+                    // getPriceAmountMicros()     — base price, no discounts
+                    // getFullPriceAmountMicros() — final price after discounts
                     .put("price", product.getOneTimePurchaseOfferDetails() != null
-                        ? (double) product.getOneTimePurchaseOfferDetails().getPriceAmountMicros()
-                        : 0.0
+                        ? product.getOneTimePurchaseOfferDetails().getPriceAmountMicros()
+                        : 0L
                     )
                     .put("priceWithDiscount", product.getOneTimePurchaseOfferDetails() != null
-                        ? (double) product.getOneTimePurchaseOfferDetails().getFullPriceAmountMicros()
-                        : 0.0
+                        ? product.getOneTimePurchaseOfferDetails().getFullPriceAmountMicros()
+                        : 0L
                     )
                     .put("priceWithoutDiscount", product.getOneTimePurchaseOfferDetails() != null
-                        ? (double) product.getOneTimePurchaseOfferDetails().getPriceAmountMicros()
-                        : 0.0
+                        ? product.getOneTimePurchaseOfferDetails().getPriceAmountMicros()
+                        : 0L
                     )
                     .put("currency", product.getOneTimePurchaseOfferDetails() != null
                         ? product.getOneTimePurchaseOfferDetails().getPriceCurrencyCode()
@@ -2074,6 +2084,12 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     )
                     .put("formattedPriceWithoutDiscount", product.getOneTimePurchaseOfferDetails() != null
                         ? product.getOneTimePurchaseOfferDetails().getFormattedPrice()
+                        : ""
+                    )
+                    .put("discountPercentage",
+                        product.getOneTimePurchaseOfferDetails() != null
+                            && product.getOneTimePurchaseOfferDetails().getDiscountDisplayInfo() != null
+                        ? String.valueOf(product.getOneTimePurchaseOfferDetails().getDiscountDisplayInfo().getPercentageDiscount())
                         : ""
                     )
                     .put("iconUrl", product.getIconUrl());
@@ -2126,13 +2142,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
                 resultJsonObject
                     .put("status",
-                        purchase.getPurchaseState() != Purchase.PurchaseState.PURCHASED
+                        purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED
                             ? "purchased"
                             : "pending"
                     )
                     .put("orderId", purchase.getOriginalOrderId() != null ? purchase.getOriginalOrderId() : "")
+                    // invoiceId and transactionId both map to getOrderId() — the Xsolla mobile SDK
+                    // does not expose a separate transaction identifier distinct from the invoice ID.
                     .put("invoiceId", purchase.getOrderId() != null ? purchase.getOrderId() : "")
                     .put("transactionId", purchase.getOrderId() != null ? purchase.getOrderId() : "")
+                    .put("developerPayload", purchase.getDeveloperPayload() != null ? purchase.getDeveloperPayload() : "")
                     .put("receipt", purchase.getPurchaseToken());
             } catch (Exception e) {
                 logError("Failed to convert a purchase into JSON object (" + productId + ")");
