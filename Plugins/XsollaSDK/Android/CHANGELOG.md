@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.39] - 01-04-2026
+
+### Changed
+
+- Updated `Payments`: 1.4.20 -> 1.4.21
+
+### Fixed
+
+- Fixed PayStation WebView not recovering from main-frame load errors and connectivity changes
+- Fixed stale payment redirect pulling the app to the foreground when another payment flow is active
+- Fixed redirect nonce not appended to custom redirect URLs (only the default deep-link URL needs it)
+- Fixed `paymentFlowActive` flag shared across `BillingClient` instances causing incorrect redirect routing when multiple instances coexist; active flows are now tracked per-nonce in `PaymentFlowRegistry`
+
 ## [3.0.38] - 24-03-2026
 
 ### Added

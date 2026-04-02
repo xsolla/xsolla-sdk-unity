@@ -1,3 +1,20 @@
+## [3.1.6] - 2026-02-04
+
+### Changed
+
+- Android: updated SDK to `3.0.39` (WebView and redirect reliability fixes)
+
+### Added
+
+- Added `SetCustomPayStationProductionDomain` and `SetCustomPayStationSandboxDomain` builder methods — allow overriding the Pay Station domain for a single environment without affecting the other
+
+### Fixed
+
+- Android: Fixed PayStation WebView not recovering from network errors and connectivity changes
+- Android: Fixed stale payment redirect bringing the app to the foreground while another payment flow is active
+- Android: Fixed redirect nonce not appended to custom redirect URLs
+- Android: Fixed payment flow routing when multiple billing client instances coexist
+
 ## [3.1.5] - 2026-24-03
 
 ### Changed

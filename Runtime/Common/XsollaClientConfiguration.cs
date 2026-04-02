@@ -200,25 +200,60 @@ namespace Xsolla.SDK.Common
                 return this;
             }
             
+            /// <summary>
+            /// Overrides the Pay Station domain used to open the payment UI for both environments.
+            ///
+            /// By default the SDK uses Xsolla's hosted Pay Station URLs:
+            /// <list type="bullet">
+            ///   <item><description>Production — <c>https://secure.xsolla.com</c></description></item>
+            ///   <item><description>Sandbox    — <c>https://sandbox-secure.xsolla.com</c></description></item>
+            /// </list>
+            ///
+            /// Pass <c>null</c> or an empty string for either argument to keep the corresponding
+            /// environment's default domain unchanged.
+            ///
+            /// The value must be an absolute URL, e.g. <c>https://pay.example.com</c>.
+            /// Query strings and paths are not allowed — supply the scheme and host only.
+            /// </summary>
+            /// <param name="domainProduction">Custom domain for the live (production) environment.</param>
+            /// <param name="domainSandbox">Custom domain for the sandbox (test) environment.</param>
             public Builder SetCustomPayStationDomain(string domainProduction, string domainSandbox)
             {
                 if (!isValidDomain(domainProduction))
                     XsollaLogger.Error(TAG, "Invalid production domain format.");
                 if (!isValidDomain(domainSandbox))
                     XsollaLogger.Error(TAG, "Invalid sandbox domain format.");
-                
+
                 _configuration.customPayStationDomainProduction = isValidDomain(domainProduction) ? domainProduction : string.Empty;
                 _configuration.customPayStationDomainSandbox = isValidDomain(domainSandbox) ? domainSandbox : string.Empty;
                 return this;
-                
-                bool isValidDomain(string domain)
+
+                static bool isValidDomain(string domain)
                 {
                     if (string.IsNullOrEmpty(domain))
                         return true;
-                    
+
                     return Uri.IsWellFormedUriString(domain, UriKind.Absolute);
                 }
             }
+
+            /// <summary>
+            /// Overrides the Pay Station domain for the live (production) environment only.
+            /// The sandbox domain is left unchanged.
+            /// <para>See <see cref="SetCustomPayStationDomain(string,string)"/> for format details.</para>
+            /// </summary>
+            /// <param name="domainProduction">Custom domain for the live (production) environment.</param>
+            public Builder SetCustomPayStationProductionDomain(string domainProduction)
+                => SetCustomPayStationDomain(domainProduction, _configuration.customPayStationDomainSandbox);
+
+            /// <summary>
+            /// Overrides the Pay Station domain for the sandbox (test) environment only.
+            /// The production domain is left unchanged.
+            /// <para>See <see cref="SetCustomPayStationDomain(string,string)"/> for format details.</para>
+            /// </summary>
+            /// <param name="domainSandbox">Custom domain for the sandbox (test) environment.</param>
+            public Builder SetCustomPayStationSandboxDomain(string domainSandbox)
+                => SetCustomPayStationDomain(_configuration.customPayStationDomainProduction, domainSandbox);
 
             /// <summary>
             /// Builds and returns the <see cref="XsollaClientConfiguration"/> instance.

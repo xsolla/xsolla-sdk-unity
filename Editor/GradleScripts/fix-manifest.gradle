@@ -6,55 +6,54 @@
 
 afterEvaluate {
     android.applicationVariants.all { variant ->
-        def taskName = "process${variant.name.capitalize()}ManifestForPackage"
-        def manifestTask = tasks.findByName(taskName)
+        // AGP 7.x+ uses ManifestForPackage; AGP 3.x/4.x used plain Manifest.
+        def candidateTaskNames = [
+            "process${variant.name.capitalize()}ManifestForPackage",
+            "process${variant.name.capitalize()}Manifest"
+        ]
 
-        if (manifestTask) {
-            manifestTask.doLast {
-                try {
-                    def manifestFile = findManifest(variant)
+        def manifestTask = candidateTaskNames.collect { tasks.findByName(it) }.find { it != null }
 
-                    if (!manifestFile) {
-                        println "[Xsolla] Manifest file not found for ${variant.name}, skipping fixes."
-                        return
-                    }
+        if (!manifestTask) {
+            println "[Xsolla] WARNING: No manifest task found for variant '${variant.name}'."
+            println "[Xsolla]   Tried: ${candidateTaskNames.join(', ')}"
+            println "[Xsolla]   Manifest fixes will NOT be applied — check AGP version compatibility."
+            return
+        }
 
-                    def manifest = new XmlSlurper(false, false).parseText(manifestFile.text)
-                    def changed = false
+        manifestTask.doLast {
+            try {
+                def manifestFile = manifestTask.outputs.files.asFileTree
+                    .find { it.name == 'AndroidManifest.xml' }
 
-                    changed |= removePayStationCacheInitializer(manifest)
-                    changed |= removeRedirectActivityIntentFilters(manifest)
-
-                    if (changed) {
-                        def serialized = groovy.xml.XmlUtil.serialize(
-                            new groovy.xml.StreamingMarkupBuilder().bind { mkp.yield manifest }
-                        )
-                        manifestFile.text = serialized
-                        println "[Xsolla] Manifest fixed for ${variant.name} build."
-                    } else {
-                        println "[Xsolla] Manifest for ${variant.name} needs no fixes."
-                    }
-                } catch (Exception e) {
-                    println "[Xsolla] Warning: Could not fix manifest for ${variant.name}: ${e.message}"
+                if (!manifestFile || !manifestFile.exists()) {
+                    println "[Xsolla] WARNING: AndroidManifest.xml not found in ${manifestTask.name} outputs."
+                    println "[Xsolla]   Manifest fixes will NOT be applied."
+                    return
                 }
+
+                def manifest = new XmlParser(false, false).parseText(manifestFile.text)
+                def changed = false
+
+                changed |= removePayStationCacheInitializer(manifest)
+                changed |= removeRedirectActivityIntentFilters(manifest)
+
+                if (changed) {
+                    // Preserve the original XML declaration — XmlNodePrinter does not emit one.
+                    def declaration = manifestFile.text.readLines().find { it.startsWith('<?xml') }
+                        ?: '<?xml version="1.0" encoding="utf-8"?>'
+                    def writer = new StringWriter()
+                    new groovy.xml.XmlNodePrinter(new PrintWriter(writer)).print(manifest)
+                    manifestFile.text = declaration + '\n' + writer.toString()
+                    println "[Xsolla] Manifest fixed for ${variant.name} build."
+                } else {
+                    println "[Xsolla] Manifest for ${variant.name} needs no fixes."
+                }
+            } catch (Exception e) {
+                throw new GradleException("[Xsolla] Failed to fix manifest for ${variant.name}: ${e.message}", e)
             }
         }
     }
-}
-
-def findManifest(variant) {
-    def searchPaths = [
-        "intermediates/packaged_manifests/${variant.name}/process${variant.name.capitalize()}ManifestForPackage/AndroidManifest.xml",
-        "intermediates/packaged_manifests/${variant.name}/AndroidManifest.xml",
-        "intermediates/merged_manifests/${variant.name}/AndroidManifest.xml"
-    ]
-
-    for (path in searchPaths) {
-        def file = new File(project.buildDir, path)
-        if (file.exists()) return file
-    }
-
-    return null
 }
 
 // Removes PayStationCacheInitializer from the startup InitializationProvider
@@ -63,13 +62,12 @@ def removePayStationCacheInitializer(manifest) {
     def removed = false
 
     manifest.application.provider.each { provider ->
-        if (provider.'@android:name'.text() == 'androidx.startup.InitializationProvider') {
-            provider.'meta-data'.findAll {
-                it.'@android:name'.text() == 'com.xsolla.android.payments.caching.PayStationCacheInitializer'
-            }.each {
-                it.replaceNode {}
-                removed = true
+        if (provider['@android:name'] == 'androidx.startup.InitializationProvider') {
+            def toRemove = provider.'meta-data'.findAll {
+                it['@android:name'] == 'com.xsolla.android.payments.caching.PayStationCacheInitializer'
             }
+            toRemove.each { provider.remove(it) }
+            if (!toRemove.isEmpty()) removed = true
         }
     }
 
@@ -88,11 +86,10 @@ def removeRedirectActivityIntentFilters(manifest) {
     def removed = false
 
     manifest.application.activity.each { activity ->
-        if (activity.'@android:name'.text().endsWith('ActivityPayStationRedirect')) {
-            activity.'intent-filter'.each {
-                it.replaceNode {}
-                removed = true
-            }
+        if (activity['@android:name']?.endsWith('ActivityPayStationRedirect')) {
+            def toRemove = activity.'intent-filter'.collect { it }
+            toRemove.each { activity.remove(it) }
+            if (!toRemove.isEmpty()) removed = true
         }
     }
 

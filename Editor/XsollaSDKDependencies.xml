@@ -3,7 +3,7 @@
   <androidPackages>
       <androidPackage spec="com.xsolla.android:inventory:2.0.4" />
       <androidPackage spec="com.xsolla.android:login:6.0.18" />
-      <androidPackage spec="com.xsolla.android:payments:1.4.20" />
+      <androidPackage spec="com.xsolla.android:payments:1.4.21" />
       <androidPackage spec="com.xsolla.android:store:2.5.16" />
 
       <androidPackage spec="org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.7.10" />

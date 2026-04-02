@@ -1,10 +1,7 @@
 ﻿using System;
-using Xsolla.SDK.Store;
 
-#if UNITY_ANDROID
 // For the order tracking cancellation.
 using Xsolla.SDK.Store;
-#endif // UNITY_ANDROID
 
 namespace Xsolla.SDK.Extensions
 {
