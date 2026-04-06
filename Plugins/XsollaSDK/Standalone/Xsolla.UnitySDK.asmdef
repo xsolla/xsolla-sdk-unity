@@ -5,6 +5,7 @@
     "includePlatforms": [
         "Editor",
         "EmbeddedLinux",
+        "LinuxStandalone64",
         "macOSStandalone",
         "WSA",
         "WebGL",
