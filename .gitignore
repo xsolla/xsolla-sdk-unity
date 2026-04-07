@@ -8,8 +8,3 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
-
-# Unity meta files for non-package assets
-README.md.meta
-CHANGELOG.md.meta
-LICENSE.meta
