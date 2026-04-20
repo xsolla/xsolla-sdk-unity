@@ -239,6 +239,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     private static boolean redirectAppRelaunchEnabled = false;
 
+    private static boolean collapseRestoredMultiUnitPurchases = false;
+
     @Nullable
     private static String webshopUrl = null;
 
@@ -453,6 +455,10 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .map(advancedSettings -> advancedSettings.optBoolean("redirectAppRelaunchEnabled"))
             .orElse(false);
 
+        collapseRestoredMultiUnitPurchases = maybeAdvancedSettings
+            .map(advancedSettings -> advancedSettings.optBoolean("collapseRestoredMultiUnitPurchases"))
+            .orElse(false);
+
         logDebug("Initialize: " + argsJson);
         logDebug("SimpleMode: " + simpleMode);
         logDebug("UseBuyButtonSolution: " + useBuyButtonSolution);
@@ -465,6 +471,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         logDebug("FetchProductsWithGeoLocale: " + fetchProductsWithGeoLocale);
         logDebug("QueryCancellationReasonEnabled: " + queryCancellationReasonEnabled);
         logDebug("RedirectAppRelaunchEnabled: " + redirectAppRelaunchEnabled);
+        logDebug("CollapseRestoredMultiUnitPurchases: " + collapseRestoredMultiUnitPurchases);
 //      logDebug("InvokePurchasesUpdatedIfOrderIdMissing: " + fetchProductsWithGeoLocale);
         logDebug("AdditionalSettings: " + maybeAdditionalSettingsJson.orElse(null));
 
@@ -481,6 +488,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     .withCommon(common -> common
                         .withDebugEnabled(debug.orElse(false))
                         .withRetryPolicies(maybeRetryPolicies.orElse(null))
+                        .withCollapseRestoredMultiUnitPurchases(collapseRestoredMultiUnitPurchases)
                     )
                     .withPayments(payments -> {
                         ConfigWithoutIntegration.Payments.Activity newActivity = payments.getActivity();

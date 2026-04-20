@@ -1,3 +1,14 @@
+## [3.1.10] - 2026-20-04
+
+### Changed
+
+- Android: updated SDK to `3.0.41` (opt-in multi-unit purchase collapsing on restore)
+
+### Added
+
+- Android: Added `collapseRestoredMultiUnitPurchases` setting to `AdvancedSettingsAndroid` — controls whether restored multi-unit SKUs are expanded into individual quantity-1 notifications (default) or reported as a single combined batch; collapse is recommended for high-quantity SKUs such as soft currency
+- Android: Native SDK dependency is now resolved from the public GitHub Maven repository (`https://raw.githubusercontent.com/xsolla/xsolla-sdk-android/main`) via EDM4U rather than bundled as a local `.aar`; transitive dependencies are resolved automatically through the POM
+
 ## [3.1.9] - 2026-04-15
 
 ### Fixed

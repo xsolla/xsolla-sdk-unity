@@ -47,6 +47,30 @@ namespace Xsolla.SDK.Common
             public bool redirectAppRelaunchEnabled;
 
             /// <summary>
+            /// Controls how the SDK reports restored purchases when the Inventory API returns a
+            /// combined quantity for a SKU rather than individual transaction records — a known limitation
+            /// of the Inventory API (e.g. three separate purchases of SKU X are surfaced as quantity 3
+            /// with no way to recover the original transaction boundaries).
+            /// <para/>
+            /// When <c>false</c> (default), the SDK expands the combined quantity back into
+            /// individual quantity-1 purchase notifications.
+            /// A hard cap applies: if the combined quantity exceeds the internal threshold,
+            /// the SKU is collapsed regardless of this flag and a warning is logged.
+            /// Prefer this for discrete consumables with low expected quantities
+            /// (e.g. a few health potions, a handful of level-skip items).
+            /// <para/>
+            /// When <c>true</c>, the SDK reports the full combined quantity as a single purchase
+            /// notification per SKU, bypassing the expansion entirely.
+            /// Prefer this for high-quantity SKUs where per-unit expansion is impractical
+            /// (e.g. soft currency, stackable resources that players accumulate in the thousands).
+            /// <para/>
+            /// This flag has no effect when the Events API is used for purchase tracking, as the
+            /// Events API exposes individual transaction records directly and does not require
+            /// any quantity expansion or collapsing workarounds.
+            /// </summary>
+            public bool collapseRestoredMultiUnitPurchases;
+
+            /// <summary>
             /// Sets a set of providers that need to be excluded from being used by the
             /// SDK when opening a custom tab or a trusted web activity.
             /// <para/>
@@ -156,6 +180,22 @@ namespace Xsolla.SDK.Common
             public AdvancedSettingsAndroid SetRedirectAppRelaunchEnabled(bool redirectAppRelaunchEnabled)
             {
                 this.redirectAppRelaunchEnabled = redirectAppRelaunchEnabled;
+                return this;
+            }
+
+            /// <summary>
+            /// Sets whether restored multi-unit purchases are collapsed into a single per-SKU
+            /// notification or expanded into individual quantity-1 notifications.
+            /// <para/>
+            /// See <see cref="collapseRestoredMultiUnitPurchases"/> for full details and caveats.
+            /// </summary>
+            /// <param name="collapseRestoredMultiUnitPurchases">
+            /// <c>true</c> to report the combined quantity as one notification per SKU;
+            /// <c>false</c> (default) to expand into individual quantity-1 notifications.
+            /// </param>
+            public AdvancedSettingsAndroid SetCollapseRestoredMultiUnitPurchases(bool collapseRestoredMultiUnitPurchases)
+            {
+                this.collapseRestoredMultiUnitPurchases = collapseRestoredMultiUnitPurchases;
                 return this;
             }
         }
