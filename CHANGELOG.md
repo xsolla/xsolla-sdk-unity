@@ -1,3 +1,9 @@
+## [3.1.11] - 2026-23-04
+
+### Changed
+
+- Android: updated SDK to `3.0.42` (a fix for transient dependency conflicts)
+
 ## [3.1.10] - 2026-20-04
 
 ### Changed

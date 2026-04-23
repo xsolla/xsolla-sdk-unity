@@ -3,6 +3,6 @@
     internal static class Constants
     {
         public const string SDK_NAME = "mobile";
-        public const string SDK_VERSION = "3.1.10";
+        public const string SDK_VERSION = "3.1.11";
     }
 }
