@@ -4,7 +4,7 @@ namespace Xsolla.Core
 	{
 		public string accessToken;
 		public string refreshToken;
-		public int expirationTime;
+		public long expirationTime;
 		public bool isBasedOnDeviceId;
 	}
 }

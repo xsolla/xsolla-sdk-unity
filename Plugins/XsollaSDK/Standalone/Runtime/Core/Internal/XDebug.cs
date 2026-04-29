@@ -62,5 +62,21 @@ namespace Xsolla.Core
 				_onLogCallback?.Invoke(LogLevel.Errors, $"[ERROR]{tag} {message}");
 			}
 		}
+
+		// Verbose, dev-only logging. Use for messages that may contain
+		// sensitive information (raw tokens, decoded JWT payloads, request
+		// bodies, etc.). Calls — including their argument evaluation — are
+		// stripped at compile time when neither UNITY_EDITOR nor
+		// DEVELOPMENT_BUILD is defined, so they cannot appear in production
+		// player builds of consuming apps.
+		[System.Diagnostics.Conditional("UNITY_EDITOR")]
+		[System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+		public static void LogDebug(XsollaSettings settings, object message)
+			=> Log(TAG, message, ignoreLogLevel: false, settings);
+
+		[System.Diagnostics.Conditional("UNITY_EDITOR")]
+		[System.Diagnostics.Conditional("DEVELOPMENT_BUILD")]
+		public static void LogDebug(object message)
+			=> Log(TAG, message, ignoreLogLevel: false);
 	}
 }

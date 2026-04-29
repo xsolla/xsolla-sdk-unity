@@ -1,3 +1,9 @@
+## [3.1.12] - 2026-29-04
+
+### Changed
+
+- Win/Mac/Web: improved auth token refreshing (takes social claims into account)
+
 ## [3.1.11] - 2026-23-04
 
 ### Changed

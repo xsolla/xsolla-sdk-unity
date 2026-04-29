@@ -12,6 +12,7 @@ namespace Xsolla.Auth
 		private readonly string Locale;
 		private readonly SdkType SdkType;
 		private readonly XsollaSettings Settings;
+		private string LaunchRedirectUrl;
 
 		public StandaloneWidgetAuthenticator(XsollaSettings settings, Action onSuccessCallback, Action<Error> onErrorCallback, Action onCancelCallback, string locale, SdkType sdkType)
 		{
@@ -28,13 +29,16 @@ namespace Xsolla.Auth
 			string redirectUrl =  null;
 			if (Application.isEditor && EditorProvider.Handler != null && !string.IsNullOrEmpty(EditorProvider.Handler.DeeplinkUrl))
 				redirectUrl = EditorProvider.Handler.DeeplinkUrl;
-			
+
+			// Cache so the code-for-token exchange sends a byte-identical redirect_uri (OAuth2 mismatches surface as 010-023).
+			LaunchRedirectUrl = RedirectUrlHelper.GetRedirectUrl(Settings, redirectUrl);
+
 			var url = new UrlBuilder("https://login-widget.xsolla.com/latest/")
 				.AddProjectId(Settings.LoginId)
 				.AddClientId(Settings.OAuthClientId)
 				.AddResponseType("code")
 				.AddState("xsollatest")
-				.AddRedirectUri(RedirectUrlHelper.GetRedirectUrl(Settings, redirectUrl))
+				.AddRedirectUri(LaunchRedirectUrl)
 				.AddScope("offline")
 				.AddLocale(Locale)
 				.Build();
@@ -53,6 +57,7 @@ namespace Xsolla.Auth
 					parsedCode,
 					() => OnSuccessCallback?.Invoke(),
 					error => OnErrorCallback?.Invoke(error),
+					redirectUri: LaunchRedirectUrl,
 					sdkType: SdkType);
 			}
 			else if (ParseUtils.TryGetValueFromUrl(newUrl, ParseParameter.token, out var parsedToken))

@@ -1,13 +1,9 @@
-﻿#if UNITY_STANDALONE || UNITY_WEBGL || UNITY_EDITOR //&& DISABLED_TMP
-using System;
-using System.Collections.Generic;
+#if UNITY_STANDALONE || UNITY_WEBGL || UNITY_EDITOR //&& DISABLED_TMP
 using JetBrains.Annotations;
 using UnityEngine;
 using Xsolla.Auth;
 using Xsolla.Core;
 using Xsolla.SDK.Common;
-using Xsolla.UserAccount;
-using Xsolla.SDK.Utils;
 
 namespace Xsolla.SDK.Login
 {
@@ -19,16 +15,16 @@ namespace Xsolla.SDK.Login
         public void Login(XsollaClientConfiguration configuration, LoginResultFunc onSuccess, ErrorFunc onError)
         {
             _settings = FillFromConfiguration(configuration);
-            
+
             XsollaLogger.Debug(Tag, "Login");
 
             LoginSilently(configuration, onSuccess: onSuccess, onError: error =>
             {
-                XsollaLogger.Debug(Tag, $"LoginSilently onError: {error}, try to login with widget");
-                
+                XsollaLogger.Debug(Tag, $"Silent login unavailable ({error}); falling back to widget auth");
+
                 var locale = configuration.GetCurrentLocale();
-                XsollaLogger.Debug(Tag, $"CurrentLocale: {locale}");
-                
+                XsollaLogger.Debug(Tag, $"CurrentLocale: {(string.IsNullOrEmpty(locale?.ToString()) ? "(not set)" : locale.ToString())}");
+
                 // In Editor there is no way to use login widget, try to login with device ID
                 if (Application.isEditor && string.IsNullOrEmpty(EditorProvider.Handler?.DeeplinkUrl))
                 {
@@ -47,7 +43,7 @@ namespace Xsolla.SDK.Login
                     );
                     return;
                 }
-  
+
                 // If silent login failed, try to login with widget
                 XsollaAuth.AuthWithXsollaWidget(
                     _settings,
@@ -74,7 +70,7 @@ namespace Xsolla.SDK.Login
         public void LoginSilently(XsollaClientConfiguration configuration, LoginResultFunc onSuccess, ErrorFunc onError)
         {
             _settings = FillFromConfiguration(configuration);
-            
+
             XsollaLogger.Debug(Tag, "LoginSilently");
 
             XsollaAuth.AuthViaXsollaLauncher(
@@ -86,8 +82,8 @@ namespace Xsolla.SDK.Login
                 },
                 onError: error =>
                 {
-                    XsollaLogger.Debug(Tag, $"Authenticate Via Launcher onError {error}, trying to auth by saved token");
-                    
+                    XsollaLogger.Debug(Tag, $"Launcher auth not available ({error}); trying saved token");
+
                     XsollaAuth.AuthBySavedToken(
                         _settings,
                         onSuccess: () =>
@@ -97,21 +93,21 @@ namespace Xsolla.SDK.Login
                         },
                         onError: error =>
                         {
-                            XsollaLogger.Debug(Tag, $"Authenticate By Saved Token onError: {error}");
+                            XsollaLogger.Debug(Tag, $"Saved token unavailable ({error})");
                             onError?.Invoke($"Failed to login silently ({error})");
                         }
-                    );  
+                    );
                 }
             );
         }
-        
+
         public void LoginWithSocialAccount(XsollaClientConfiguration configuration, string provider, string accountToken, LoginResultFunc onSuccess, ErrorFunc onError)
         {
             _settings = FillFromConfiguration(configuration);
-            
+
             XsollaAuth.AuthWithSocialNetworkAccessToken(
-                _settings, 
-                accessToken: accountToken, accessTokenSecret: null, openId: null, 
+                _settings,
+                accessToken: accountToken, accessTokenSecret: null, openId: null,
                 provider: provider,
                 onSuccess: () =>
                 {
@@ -124,26 +120,31 @@ namespace Xsolla.SDK.Login
                     onError?.Invoke(error.ToString());
                 }
             );
-            
-            
         }
 
-        public void ClearToken(XsollaClientConfiguration configuration, ClearTokenResultFunc onSuccess, ErrorFunc onError) 
+        public void ClearToken(XsollaClientConfiguration configuration, ClearTokenResultFunc onSuccess, ErrorFunc onError)
         {
             _settings = FillFromConfiguration(configuration);
-            
+
             _settings.XsollaToken.DeleteSavedInstance();
             onSuccess?.Invoke();
         }
 
         public bool CanRefreshToken =>
-            (_settings.OAuthClientId != -1 && _settings.OAuthClientId != 0) && 
+            (_settings.OAuthClientId != -1 && _settings.OAuthClientId != 0) &&
             !string.IsNullOrEmpty(_settings.XsollaToken.RefreshToken);
 
         public void RefreshToken(XsollaClientConfiguration configuration, XsollaLoginToken token, LoginResultFunc onSuccess, ErrorFunc onError)
         {
             _settings = FillFromConfiguration(configuration);
-            
+
+            // FillFromConfiguration hydrates the token from PlayerPrefs. If the caller supplied
+            // a fresher token explicitly, it wins — they may hold a pair newer than what's on disk.
+            // IsBasedOnDeviceId is preserved from the loaded instance because XsollaLoginToken
+            // doesn't carry that flag.
+            if (!string.IsNullOrEmpty(token?.refreshToken))
+                _settings.XsollaToken.Create(token.accessToken, token.refreshToken, isBasedOnDeviceId: _settings.XsollaToken.IsBasedOnDeviceId);
+
             if (_settings.OAuthClientId != -1 && _settings.OAuthClientId != 0) {
                 if (!string.IsNullOrEmpty(_settings.XsollaToken.RefreshToken)) {
                     XsollaAuth.RefreshToken(
@@ -157,7 +158,6 @@ namespace Xsolla.SDK.Login
                         },
                         onError: err => {
                             XsollaLogger.Debug(Tag, $"Refresh onError {err}");
-
                             onError?.Invoke(err.ToString());
                         }
                     );
@@ -174,16 +174,16 @@ namespace Xsolla.SDK.Login
             Info.SDK_NAME = Common.Constants.SDK_NAME;
             Info.SDK_VERSION = Common.Constants.SDK_VERSION;
 
-            var settings = new XsollaSettings();
-            
-            settings.LogLevel = configuration.logLevel switch
+            var settings = new XsollaSettings
             {
-                XsollaLogLevel.Debug => LogLevel.InfoWarningsErrors,
-                XsollaLogLevel.Warning => LogLevel.WarningsErrors,
-                XsollaLogLevel.Error => LogLevel.Errors,
-                _ => LogLevel.Errors
+                LogLevel = configuration.logLevel switch
+                {
+                    XsollaLogLevel.Debug => LogLevel.InfoWarningsErrors,
+                    XsollaLogLevel.Warning => LogLevel.WarningsErrors,
+                    _ => LogLevel.Errors
+                }
             };
-            
+
             var callback = XsollaLogger.GetOnLogCallback();
             if (callback != null) {
                 XDebug.SetOnLogCallback( (lvl, msg) =>
@@ -200,24 +200,28 @@ namespace Xsolla.SDK.Login
                     );
                 });
             }
-            
+
             settings.StoreProjectId = configuration.settings.projectId.ToString();
             settings.IsSandbox = configuration.sandbox;
             settings.LoginId = configuration.settings.loginId;
             settings.OAuthClientId = configuration.settings.oauthClientId;
-            
+
             settings.InAppBrowserEnabled = false;
+
+            // Methods like RefreshToken read directly from XsollaToken without going
+            // through AuthBySavedToken, so hydrate from PlayerPrefs here. Idempotent.
+            settings.XsollaToken.TryLoadInstance();
 
             return settings;
         }
-        
+
         [NotNull]
-        static XsollaLoginToken TokenCurrent(XsollaSettings settings) => new XsollaLoginToken(
+        static XsollaLoginToken TokenCurrent(XsollaSettings settings) => new(
             accessToken: settings.XsollaToken.AccessToken,
             refreshToken: settings.XsollaToken.RefreshToken,
             expirationDate: (settings.OAuthClientId != -1 &&  settings.OAuthClientId != 0) ? settings.XsollaToken.ExpirationTime : 0
         );
-        
+
     }
 }
 
