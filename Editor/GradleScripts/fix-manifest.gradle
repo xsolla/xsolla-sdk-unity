@@ -4,55 +4,103 @@
 // may or may not win depending on dependency resolution order. This script
 // runs after the merge and deterministically applies all required fixes.
 
-afterEvaluate {
-    android.applicationVariants.all { variant ->
-        // AGP 7.x+ uses ManifestForPackage; AGP 3.x/4.x used plain Manifest.
-        def candidateTaskNames = [
-            "process${variant.name.capitalize()}ManifestForPackage",
-            "process${variant.name.capitalize()}Manifest"
-        ]
+// AGP 9 (Unity 6000.4+) removed android.applicationVariants. Older AGP versions still expose it
+// and that path has been battle-tested across Unity 2019 → 6000.3, so keep using it where present.
+// Only fall back to the task-name matcher when the legacy Variant API is gone.
+def hasLegacyVariantApi = android.metaClass.respondsTo(android, 'getApplicationVariants')
 
-        def manifestTask = candidateTaskNames.collect { tasks.findByName(it) }.find { it != null }
+if (hasLegacyVariantApi) {
+    afterEvaluate {
+        android.applicationVariants.all { variant ->
+            // AGP 7.x+ uses ManifestForPackage; AGP 3.x/4.x used plain Manifest.
+            def candidateTaskNames = [
+                "process${variant.name.capitalize()}ManifestForPackage",
+                "process${variant.name.capitalize()}Manifest"
+            ]
 
-        if (!manifestTask) {
-            println "[Xsolla] WARNING: No manifest task found for variant '${variant.name}'."
-            println "[Xsolla]   Tried: ${candidateTaskNames.join(', ')}"
-            println "[Xsolla]   Manifest fixes will NOT be applied — check AGP version compatibility."
+            def manifestTask = candidateTaskNames.collect { tasks.findByName(it) }.find { it != null }
+
+            if (!manifestTask) {
+                println "[Xsolla] WARNING: No manifest task found for variant '${variant.name}'."
+                println "[Xsolla]   Tried: ${candidateTaskNames.join(', ')}"
+                println "[Xsolla]   Manifest fixes will NOT be applied — check AGP version compatibility."
+                return
+            }
+
+            manifestTask.doLast { applyManifestFixes(manifestTask, variant.name) }
+        }
+    }
+} else {
+    // AGP 9+ path: androidComponents.onVariants is the official replacement for
+    // android.applicationVariants. Same enumeration semantics — covers all build types,
+    // all flavor combinations, exactly once each — so per-variant body matches the legacy path.
+    androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+        afterEvaluate {
+            def candidateTaskNames = [
+                "process${variant.name.capitalize()}ManifestForPackage",
+                "process${variant.name.capitalize()}Manifest"
+            ]
+
+            def manifestTask = candidateTaskNames.collect { tasks.findByName(it) }.find { it != null }
+
+            if (!manifestTask) {
+                println "[Xsolla] WARNING: No manifest task found for variant '${variant.name}'."
+                println "[Xsolla]   Tried: ${candidateTaskNames.join(', ')}"
+                println "[Xsolla]   Manifest fixes will NOT be applied — check AGP version compatibility."
+                return
+            }
+
+            manifestTask.doLast { applyManifestFixes(manifestTask, variant.name) }
+        }
+    }
+}
+
+def applyManifestFixes(manifestTask, label) {
+    try {
+        // AGP can emit several AndroidManifest.xml files from a single task (e.g. release builds
+        // produce both bundle- and apk-targeted merged manifests, plus metadata variants).
+        // Picking only the first via .find leaves the rest unmutated. Process all of them — the
+        // two removal helpers are idempotent, so manifests that don't contain the targets no-op.
+        def manifestFiles = manifestTask.outputs.files.asFileTree
+            .findAll { it.name == 'AndroidManifest.xml' && it.exists() }
+
+        if (manifestFiles.isEmpty()) {
+            println "[Xsolla] WARNING: No AndroidManifest.xml found in ${manifestTask.name} outputs."
+            println "[Xsolla]   Manifest fixes will NOT be applied."
             return
         }
 
-        manifestTask.doLast {
-            try {
-                def manifestFile = manifestTask.outputs.files.asFileTree
-                    .find { it.name == 'AndroidManifest.xml' }
+        def fixedCount = 0
+        def skippedCount = 0
 
-                if (!manifestFile || !manifestFile.exists()) {
-                    println "[Xsolla] WARNING: AndroidManifest.xml not found in ${manifestTask.name} outputs."
-                    println "[Xsolla]   Manifest fixes will NOT be applied."
-                    return
-                }
+        manifestFiles.each { manifestFile ->
+            def manifest = parseManifestXml(manifestFile.text)
+            def changed = false
 
-                def manifest = new XmlParser(false, false).parseText(manifestFile.text)
-                def changed = false
+            changed |= removePayStationCacheInitializer(manifest)
+            changed |= removeRedirectActivityIntentFilters(manifest)
 
-                changed |= removePayStationCacheInitializer(manifest)
-                changed |= removeRedirectActivityIntentFilters(manifest)
-
-                if (changed) {
-                    // Preserve the original XML declaration — XmlNodePrinter does not emit one.
-                    def declaration = manifestFile.text.readLines().find { it.startsWith('<?xml') }
-                        ?: '<?xml version="1.0" encoding="utf-8"?>'
-                    def writer = new StringWriter()
-                    new groovy.xml.XmlNodePrinter(new PrintWriter(writer)).print(manifest)
-                    manifestFile.text = declaration + '\n' + writer.toString()
-                    println "[Xsolla] Manifest fixed for ${variant.name} build."
-                } else {
-                    println "[Xsolla] Manifest for ${variant.name} needs no fixes."
-                }
-            } catch (Exception e) {
-                throw new GradleException("[Xsolla] Failed to fix manifest for ${variant.name}: ${e.message}", e)
+            if (changed) {
+                // Preserve the original XML declaration — XmlNodePrinter does not emit one.
+                def declaration = manifestFile.text.readLines().find { it.startsWith('<?xml') }
+                    ?: '<?xml version="1.0" encoding="utf-8"?>'
+                def writer = new StringWriter()
+                new groovy.xml.XmlNodePrinter(new PrintWriter(writer)).print(manifest)
+                manifestFile.text = declaration + '\n' + writer.toString()
+                println "[Xsolla] Manifest fixed for ${label} build at ${manifestFile.absolutePath}"
+                fixedCount++
+            } else {
+                skippedCount++
             }
         }
+
+        if (fixedCount == 0) {
+            println "[Xsolla] Manifest for ${label} needs no fixes (${skippedCount} file(s) checked)."
+        } else if (skippedCount > 0) {
+            println "[Xsolla] ${label}: fixed ${fixedCount} manifest file(s), ${skippedCount} already clean."
+        }
+    } catch (Exception e) {
+        throw new GradleException("[Xsolla] Failed to fix manifest for ${label}: ${e.message}", e)
     }
 }
 
@@ -98,4 +146,27 @@ def removeRedirectActivityIntentFilters(manifest) {
     }
 
     return removed
+}
+
+// Groovy 2.x exposes XmlParser at groovy.util; Groovy 3+/4 (Gradle 8+) moved it to groovy.xml.
+def parseManifestXml(String text) {
+    def parserClass = null
+
+    try {
+        parserClass = Class.forName('groovy.xml.XmlParser')
+    } catch (ClassNotFoundException ignored) {}
+
+    if (parserClass == null) {
+        try {
+            parserClass = Class.forName('groovy.util.XmlParser')
+        } catch (ClassNotFoundException ignored) {}
+    }
+
+    if (parserClass == null) {
+        throw new GradleException("[Xsolla] No XmlParser available on Groovy classpath")
+    }
+
+    return parserClass.getConstructor(boolean.class, boolean.class)
+        .newInstance(false, false)
+        .parseText(text)
 }

@@ -1,3 +1,9 @@
+## [3.1.14] - 2026-05-05
+
+### Added
+
+- Android: support for AGP 9.x (Unity 6.4+)
+
 ## [3.1.13] - 2026-05-05
 
 ### Changed

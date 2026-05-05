@@ -121,13 +121,13 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             public final Date accessTokenExpiryTime;
 
             public Success(
-                @NonNull final String accessToken,
-                @Nullable final String refreshToken,
-                @NonNull final Date accessTokenExpiryTime
+                @NonNull final AuthToken accessToken,
+                @Nullable final AuthRefreshToken refreshToken,
+                @NonNull final ExpiryTime accessTokenExpiryTime
             ) {
-                this.accessToken = accessToken;
-                this.refreshToken = refreshToken;
-                this.accessTokenExpiryTime = accessTokenExpiryTime;
+                this.accessToken = accessToken.getValue().toString();
+                this.refreshToken = refreshToken != null ? refreshToken.getValue().toString() : null;
+                this.accessTokenExpiryTime = accessTokenExpiryTime.toDate();
             }
 
             @NonNull
@@ -152,18 +152,18 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 @NonNull final JSONObject json, boolean preferRelativeExpiration
             ) {
                 try {
-                    final var expiresInSecs = preferRelativeExpiration
+                    final long expiresInSecs = preferRelativeExpiration
                         ? json.optLong("expiresIn", -1)
                         : -1;
 
-                    final var expirationTimestampMillis = expiresInSecs >= 0
-                        ? System.currentTimeMillis() + expiresInSecs * 1000
-                        : json.getLong("expirationDate") * 1000;
+                    final ExpiryTime expiryTime = expiresInSecs >= 0
+                        ? ExpiryTime.ofRelativeSecs(expiresInSecs)
+                        : ExpiryTime.ofEpochSecs(json.getLong("expirationDate"));
 
                     return new Success(
-                        json.getString("accessToken"),
-                        json.getString("refreshToken"),
-                        new Date(expirationTimestampMillis)
+                        AuthToken.of(TokenValue.of(json.getString("accessToken")).getRightOrThrow()),
+                        AuthRefreshToken.of(TokenValue.of(json.getString("refreshToken")).getRightOrThrow()),
+                        expiryTime
                     );
                 } catch (Exception e) {
                     logError("Failed to parse LoginResult.Success JSON object: " + e);
@@ -989,13 +989,13 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         billingClient.getAuthenticationToken((billingResult, authToken) -> {
             logDebug(String.format(Locale.getDefault(),
                 "GetAccessToken: Response: BillingResult=%s Token='%s'",
-                billingResult, authToken != null ? authToken.toString() : ""
+                billingResult, authToken != null ? authToken.getValue().toString() : ""
             ));
 
             final var maybeJson = Optional
                 .ofNullable(authToken)
                 .filter(__ -> billingResult.isSuccessful())
-                .flatMap(authToken_ -> JsonHelper.tokenToJson(authToken_.toString()))
+                .flatMap(authToken_ -> JsonHelper.tokenToJson(authToken_.getValue()))
                 .map(JSONObject::toString);
 
             if (maybeJson.isPresent()) {
@@ -1111,9 +1111,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                                 err -> new LoginResult.Failure(err.toString()),
                                 // Right.
                                 loginInfo -> new LoginResult.Success(
-                                    loginInfo.getToken().toString(),
+                                    loginInfo.getToken(),
                                     loginInfo.getRefreshToken().orElse(null),
-                                    loginInfo.getTokenExpiryTime().orElse(new Date())
+                                    loginInfo.getToken().getValue().getCustomExpiryTime().orElse(ExpiryTime.now())
                                 )
                             ))
                         );
@@ -1188,13 +1188,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             final var maybeArgsWithLoginInfo = maybeArgs.flatMap(args ->
                 JsonHelper.parse(loginInfoJsonStr).flatMap(json -> Optional
                     .ofNullable(LoginResult.Success.parseJson(json, true))
-                    .flatMap(loginResult -> AuthToken
+                    .flatMap(loginResult -> TokenValue
                         .of(loginResult.accessToken)
-                        .mapRight(authToken -> Pair.create(args,
+                        .mapRight(authTokenValue -> Pair.create(args,
                             new LoginInfo(
-                                authToken,
-                                loginResult.refreshToken,
-                                loginResult.accessTokenExpiryTime
+                                AuthToken.of(authTokenValue.withCustomExpiryTime(
+                                    ExpiryTime.ofDate(loginResult.accessTokenExpiryTime)
+                                )),
+                                TokenValue.of(loginResult.refreshToken)
+                                    .mapRight(AuthRefreshToken::of)
+                                    .getRightOr((AuthRefreshToken) null)
                             )
                         ))
                         .fold(
@@ -1224,9 +1227,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                         err -> new LoginResult.Failure(err.toString()),
                         // Success.
                         result -> new LoginResult.Success(
-                            result.getToken().toString(),
+                            result.getToken(),
                             result.getRefreshToken().orElse(null),
-                            result.getTokenExpiryTime().orElse(new Date())
+                            result.getToken().getValue().getCustomExpiryTime().orElse(ExpiryTime.now())
                         )
                     ))
                 );
@@ -1345,9 +1348,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                         err -> new LoginResult.Failure(err.toString()),
                         // Success.
                         result -> new LoginResult.Success(
-                            result.getToken().toString(),
+                            result.getToken(),
                             result.getRefreshToken().orElse(null),
-                            result.getTokenExpiryTime().orElse(new Date())
+                            result.getToken().getValue().getCustomExpiryTime().orElse(ExpiryTime.now())
                         )
                     )
                 ));
@@ -1612,7 +1615,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             final var loginUuid = LoginUuid.parse(settings.optString("loginId", ""));
             final var oauthId = OAuth2ClientId.parse(settings.optInt("oauthClientId", 0))
                 .flatMapRight(id -> Either.ofBoolean(id.toInteger() > 0,
-                    () -> Error.forMessage("Wrong OAuth2 client ID"),
+                    () -> Error.of("Wrong OAuth2 client ID"),
                     () -> id
                 ));
             final var token = JWT.parse(json.optString("accessToken", ""));
@@ -2159,7 +2162,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     // does not expose a separate transaction identifier distinct from the invoice ID.
                     .put("invoiceId", purchase.getOrderId() != null ? purchase.getOrderId() : "")
                     .put("transactionId", purchase.getOrderId() != null ? purchase.getOrderId() : "")
-                    .put("developerPayload", purchase.getDeveloperPayload() != null ? purchase.getDeveloperPayload() : "")
+                    .put("developerPayload", purchase.getDeveloperPayload())
                     .put("receipt", purchase.getPurchaseToken());
             } catch (Exception e) {
                 logError("Failed to convert a purchase into JSON object (" + productId + ")");
@@ -2210,11 +2213,11 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         }
 
         @NonNull
-        private static Optional<JSONObject> tokenToJson(@NonNull final String token) {
+        private static Optional<JSONObject> tokenToJson(@NonNull final TokenValue tokenValue) {
             JSONObject resultJsonObject;
             try {
                 resultJsonObject = new JSONObject()
-                                      .put("token", token);
+                    .put("token", tokenValue.toString());
             } catch (Exception e) {
                 logDebug("[tokenToJson] " + e);
                 resultJsonObject = null;
