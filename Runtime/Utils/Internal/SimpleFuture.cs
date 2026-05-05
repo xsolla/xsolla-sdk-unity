@@ -72,6 +72,9 @@ namespace Xsolla.SDK.Utils
         public bool isCompleted { get; private set; }
         public bool isFailed { get; private set; }
         
+        private static readonly Action<T> noOpSuccess = _ => { };
+        private static readonly Action<E> noOpError = _ => { };
+
         private List<(Action<T> onSuccess, Action<E> onError)> actions = new List<(Action<T> onSuccess, Action<E> onError)>();
         
         public ISimplePromise<T, E> Promise => this;
@@ -114,7 +117,7 @@ namespace Xsolla.SDK.Utils
             }
             else if (onSuccess != null || onError != null)
             {
-                actions.Add((onSuccess, onError));
+                actions.Add((onSuccess ?? noOpSuccess, onError ?? noOpError));
             }
         }
 

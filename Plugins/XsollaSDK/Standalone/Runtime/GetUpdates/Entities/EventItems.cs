@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using JetBrains.Annotations;
 using Xsolla.Core;
 
@@ -191,28 +192,14 @@ namespace Xsolla.GetUpdates
             {
                 order_id = evt.data.order?.id ?? 0;
                 order_status = isFree ? "free" : (evt.data.order?.status ?? "unknown");
-                transaction_id = isFree ? (evt.data.order.invoice_id ?? Guid.NewGuid().ToString()) : evt.data.order.invoice_id;
-                if (evt.data.items != null && evt.data.items.Length > 0)
-                {
-                    sku = evt.data.items[0].sku;
-                    quantity = evt.data.items[0].quantity;
+                transaction_id = isFree ? (evt.data.order?.invoice_id ?? Guid.NewGuid().ToString()) : evt.data.order?.invoice_id;
+                var firstItem = evt.data.items?.Length > 0 ? evt.data.items[0] : null;
+                sku = firstItem?.sku ?? string.Empty;
+                quantity = firstItem?.quantity ?? 0;
 
-                    priceAmount = evt.data.billing?.purchase != null 
-                        ? (int)Math.Round(evt.data.billing.purchase.total.amount * 100.0f) 
-                        : (int)Math.Round(float.Parse(evt.data.order.amount) * 100.0f);
-                    priceAmountBeforeDiscount = priceAmount;
-                    priceCurrency = evt.data.billing?.purchase?.total.currency ?? evt.data.order.currency;
-                }
-                else
-                {
-                    sku = string.Empty;
-                    quantity = 0;
-                    priceAmount = evt.data.billing?.purchase != null 
-                        ? (int)Math.Round(evt.data.billing.purchase.total.amount * 100.0f) 
-                        : (int)Math.Round(float.Parse(evt.data.order.amount) * 100.0f);
-                    priceAmountBeforeDiscount = priceAmount;
-                    priceCurrency = evt.data.billing?.purchase?.total.currency ?? evt.data.order.currency;
-                }
+                priceAmount = ResolvePriceCents(evt.data);
+                priceAmountBeforeDiscount = priceAmount;
+                priceCurrency = evt.data.billing?.purchase?.total.currency ?? evt.data.order?.currency;
             }
             else
             {
@@ -224,6 +211,17 @@ namespace Xsolla.GetUpdates
                 custom_parameters = new Dictionary<string, string>(evt.data.custom_parameters);
             else
                 custom_parameters = new Dictionary<string, string>();
+        }
+
+        private static int ResolvePriceCents(EventItemData data)
+        {
+            if (data.billing?.purchase != null)
+                return (int)Math.Round(data.billing.purchase.total.amount * 100.0f);
+
+            if (data.order?.amount != null && float.TryParse(data.order.amount, NumberStyles.Float, CultureInfo.InvariantCulture, out var amount))
+                return (int)Math.Round(amount * 100.0f);
+
+            return 0;
         }
 
         public static bool IsFreeItem(EventItem evt)

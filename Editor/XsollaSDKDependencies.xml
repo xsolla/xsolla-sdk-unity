@@ -1,6 +1,10 @@
 <?xml version='1.0' encoding='utf-8'?>
 <dependencies>
   <androidPackages>
-    <androidPackage spec="com.xsolla.android:mobile:3.0.42" />
+    <androidPackage spec="com.xsolla.android:mobile:3.0.43">
+      <repositories>
+        <repository>https://raw.githubusercontent.com/xsolla/xsolla-sdk-android/main</repository>
+      </repositories>
+    </androidPackage>
   </androidPackages>
 </dependencies>

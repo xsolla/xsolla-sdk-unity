@@ -216,7 +216,7 @@ namespace Xsolla.SDK.Login
         }
 
         [NotNull]
-        static XsollaLoginToken TokenCurrent(XsollaSettings settings) => new(
+        static XsollaLoginToken TokenCurrent(XsollaSettings settings) => new XsollaLoginToken(
             accessToken: settings.XsollaToken.AccessToken,
             refreshToken: settings.XsollaToken.RefreshToken,
             expirationDate: (settings.OAuthClientId != -1 &&  settings.OAuthClientId != 0) ? settings.XsollaToken.ExpirationTime : 0

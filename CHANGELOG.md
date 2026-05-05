@@ -1,3 +1,13 @@
+## [3.1.13] - 2026-05-05
+
+### Changed
+
+- Android: updated SDK to `3.0.43` (improved auth token refreshing)
+
+### Fixed
+
+- Android: correct dependency URL
+
 ## [3.1.12] - 2026-29-04
 
 ### Changed
