@@ -1,3 +1,9 @@
+## [3.1.15] - 2026-05-15
+
+### Fixed
+
+- iOS: `SetRedirectUrl()` is now respected by the WebShop flow.
+
 ## [3.1.14] - 2026-05-05
 
 ### Added

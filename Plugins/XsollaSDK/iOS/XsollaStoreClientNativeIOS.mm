@@ -803,6 +803,7 @@ static SKPaymentSettings* _JsonToPaymentSettingsWithLogLevel(const char* jsonCSt
     
     if (redirectSettings[@"redirectUrl"] != nil && [redirectSettings[@"redirectUrl"] length] > 0) {
         settings.paymentsRedirectUrl = redirectSettings[@"redirectUrl"];
+        settings.webshopRedirectUrl = redirectSettings[@"redirectUrl"];
     }
 
     if (jsonSettings[@"webViewType"] && [jsonSettings[@"webViewType"] length] > 0) {
