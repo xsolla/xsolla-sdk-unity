@@ -1,5 +1,7 @@
 # Xsolla Mobile SDK for Unity
 
+![License](https://img.shields.io/github/license/xsolla/xsolla-sdk-unity)
+![Latest release](https://img.shields.io/github/v/release/xsolla/xsolla-sdk-unity)
 [![Unity 2022.3+](https://img.shields.io/badge/Unity-2022.3%2B-orange.svg)](https://unity.com)
 [![C#](https://img.shields.io/badge/C%23-blue.svg)](https://docs.microsoft.com/en-us/dotnet/csharp/)
 [![UPM compatible](https://img.shields.io/badge/UPM-compatible-brightgreen.svg)](https://docs.unity3d.com/Manual/upm-ui.html)
@@ -141,3 +143,12 @@ public void OnPurchaseFailed(Product product, PurchaseFailureReason reason)
 ```
 
 > For the full integration guide, see the [SDK Documentation](https://developers.xsolla.com/sdk/).
+
+## Support
+
+- **GitHub Issues:** [github.com/xsolla/xsolla-sdk-unity/issues](https://github.com/xsolla/xsolla-sdk-unity/issues)
+- **Developer portal:** [developers.xsolla.com](https://developers.xsolla.com)
+
+## License
+
+Apache 2.0 License. See [LICENSE](./LICENSE).
