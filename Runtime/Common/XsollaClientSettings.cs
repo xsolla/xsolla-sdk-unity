@@ -174,6 +174,29 @@ namespace Xsolla.SDK.Common
         
         public int localPurchasesRestoreInterval = 0;
 
+        /// <summary>
+        /// Controls how multi-unit purchases are reported when restoring from the inventory
+        /// (i.e. when the Event API is disabled). The inventory merges all owned units of a SKU
+        /// into a single row with a combined quantity, so the individual purchases can't be told
+        /// apart. When <c>false</c> (default) each owned unit is reported as its own single-unit
+        /// restored purchase with a unique transaction ID, letting every unit be consumed
+        /// independently. When <c>true</c> a SKU is reported once with the full quantity, consumed
+        /// in a single call.
+        /// <para/>
+        /// This is the canonical, cross-platform flag and drives both the standalone implementation
+        /// and the native Android SDK.
+        /// <para/>
+        /// Standalone caveat: the restore-on-launch path surfaces purchases to Unity IAP through
+        /// <c>OnProductsRetrieved</c>, which carries one purchase per SKU. Split mode therefore drains
+        /// only one unit per restore (i.e. one per app launch); set this to <c>true</c> for a
+        /// multi-unit SKU to be fully consumed in a single restore on standalone. The native Android
+        /// SDK reports per-transaction and honors split directly.
+        /// <para/>
+        /// Not supported on iOS yet: iOS restores automatically via the native StoreKit observer, which
+        /// does not honor this flag, so it has no effect there.
+        /// </summary>
+        public bool collapseRestoredMultiUnitPurchases = false;
+
         /// <summary>Type of web view to use.</summary>
         [JsonConverter(typeof(StringEnumConverter))]
         public WebViewType webViewType = WebViewType.Auto;
@@ -293,6 +316,15 @@ namespace Xsolla.SDK.Common
             public Builder SetLocalPurchasesRestore(bool localPurchaseRestore) { _settings.localPurchasesRestore = localPurchaseRestore; return this; }
 
             public Builder SetLocalPurchasesRestoreInterval(int intervalSec) { _settings.localPurchasesRestoreInterval = intervalSec; return this; }
+
+            /// <summary>
+            /// Sets whether restored multi-unit purchases are collapsed into a single purchase
+            /// carrying the full quantity (<c>true</c>) or split into one single-unit purchase per
+            /// owned unit (<c>false</c>, default). See <see cref="collapseRestoredMultiUnitPurchases"/>.
+            /// <para/>
+            /// Not supported on iOS yet (no effect there).
+            /// </summary>
+            public Builder SetCollapseRestoredMultiUnitPurchases(bool collapse) { _settings.collapseRestoredMultiUnitPurchases = collapse; return this; }
             
             /// <summary>
             /// Sets whether to use the buy button solution.

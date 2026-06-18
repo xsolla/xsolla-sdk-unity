@@ -56,7 +56,9 @@ namespace Xsolla.SDK.Store
         
         public void PurchaseProduct(string sku, string developerPayload, XsollaStoreClientPurchaseArgs args, PurchaseProductResultFunc onSuccess, ErrorFunc onError)
         {
-            XsollaLogger.Debug(Tag, $"Purchase {sku} - {developerPayload} - {XsollaStoreClientHelpers.PurchaseToJson(sku, developerPayload, args.externalId)}");
+	        var finalDeveloperPayload = args.developerPayload ?? developerPayload;
+
+            XsollaLogger.Debug(Tag, $"Purchase {sku} - {finalDeveloperPayload} - {XsollaStoreClientHelpers.PurchaseToJson(sku, finalDeveloperPayload, args.externalId)}");
 
             if (_configuration != null && _configuration.simpleMode == XsollaClientConfiguration.SimpleMode.WebShop)
             {
@@ -85,6 +87,7 @@ namespace Xsolla.SDK.Store
                     .SetQuantity(1) 
                     .SetStatus(XsollaStoreClientPurchasedProduct.Status.Paid)
                     .SetReceipt("")
+                    .SetDeveloperPayload(finalDeveloperPayload)
                     .Build()
             );
         }

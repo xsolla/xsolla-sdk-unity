@@ -10,6 +10,7 @@ using Xsolla.Core;
 using Xsolla.GetUpdates;
 using Xsolla.Inventory;
 using Xsolla.SDK.Common;
+using Xsolla.SDK.Common.Extensions;
 using Xsolla.Orders;
 using Xsolla.SDK.Utils;
 
@@ -29,13 +30,24 @@ namespace Xsolla.SDK.Store
 
         private ISimpleFuture<bool, Error> _initializedFuture;
         private ISimpleFuture<bool, Error> _authTokenFuture;
-        private ISimpleFuture<StoreItem[], Error> _productsRequestFuture;
         private XsollaClientConfiguration configuration;
         private XsollaSettings _settings;
 
         private PurchaseProductResultFunc onUnorderedPurchaseProduct;
 
+        private List<string> _products = new List<string>();
+
+        // Bumped on Deinitialize so a product fetch (or its retry) that resolves after teardown is
+        // dropped instead of re-poisoning the cleared dedup set or completing an abandoned promise.
+        private int _productsGeneration;
+
         private const int PageLimit = 50;
+
+        // The Inventory API merges every owned unit of a SKU into one row, so a SKU that models
+        // in-game currency per unit can report an enormous quantity. Splitting that into single-unit
+        // purchases would allocate one purchase per unit; past this count we force-collapse into a
+        // single multi-unit purchase regardless of CollapseRestoredMultiUnitPurchases.
+        private const int HardSplitQuantityCapPerSku = 100;
 
         #region Interface implementation
 
@@ -123,30 +135,64 @@ namespace Xsolla.SDK.Store
                 onSuccess?.Invoke(Array.Empty<XsollaStoreClientPurchasedProduct>());
                 return;
             }
-            
-                   
+
             var result = new List<InventoryItem>();
 
             RestoreRecursive(
-                onSuccess: () =>
-                {
-                    onSuccess?.Invoke(result.ToArray().Map(item => 
-                        XsollaStoreClientPurchasedProduct.Builder.Create()
-                            .SetOrderId(0) 
-                            .SetTransactionId(Guid.NewGuid().ToString()) 
-                            .SetSku(item.sku)
-                            .SetQuantity(1) 
-                            .SetStatus(XsollaStoreClientPurchasedProduct.Status.Restored)
-                            .SetReceipt("")
-                            .Build()
-                    ));
-                },
+                onSuccess: () => onSuccess?.Invoke(BuildRestoredPurchases(result)),
                 onError: error => onError?.Invoke(error.ToString()),
                 limit: PageLimit,
                 offset: 0,
                 result
             );
         }
+
+        private XsollaStoreClientPurchasedProduct[] BuildRestoredPurchases(List<InventoryItem> items)
+        {
+            var collapse = configuration.settings.collapseRestoredMultiUnitPurchases;
+            var purchases = new List<XsollaStoreClientPurchasedProduct>(items.Count);
+
+            foreach (var item in items)
+            {
+                var quantity = item.quantity ?? 1;
+                if (quantity < 1)
+                    quantity = 1;
+
+                // A single inventory row carries the combined quantity of all owned units with no
+                // per-purchase breakdown, so restoring without the Event API can't tell the units
+                // apart. Splitting yields one single-unit purchase per owned unit (each with its own
+                // transaction ID) so every unit is consumed independently; collapsing keeps them as
+                // one purchase consumed in a single call.
+                var forceCollapse = quantity >= HardSplitQuantityCapPerSku;
+
+                if (forceCollapse && !collapse)
+                    XsollaLogger.Warning(Tag, $"Restore: quantity ({quantity}) for sku '{item.sku}' exceeds split cap ({HardSplitQuantityCapPerSku}); collapsing into a single purchase.");
+
+                XsollaLogger.Debug(Tag, $"Restore: sku={item.sku} quantity={quantity} collapse={collapse || forceCollapse}");
+
+                if (collapse || forceCollapse)
+                    purchases.Add(BuildRestoredPurchase(item.sku, quantity));
+                else
+                {
+                    for (var i = 0; i < quantity; i++)
+                        purchases.Add(BuildRestoredPurchase(item.sku, 1));
+                }
+            }
+
+            XsollaLogger.Debug(Tag, $"Restore: built {purchases.Count} purchase(s) from {items.Count} inventory row(s) (collapse={collapse}) — collapse keeps multi-unit SKUs as one qty=N purchase, split emits one qty=1 purchase per unit.");
+
+            return purchases.ToArray();
+        }
+
+        private static XsollaStoreClientPurchasedProduct BuildRestoredPurchase(string sku, int quantity) =>
+            XsollaStoreClientPurchasedProduct.Builder.Create()
+                .SetOrderId(0)
+                .SetTransactionId(Guid.NewGuid().ToString())
+                .SetSku(sku)
+                .SetQuantity(quantity)
+                .SetStatus(XsollaStoreClientPurchasedProduct.Status.Restored)
+                .SetReceipt("")
+                .Build();
 
         private void UpdateWebhooks(RestorePurchasesResultFunc onSuccess, ErrorFunc onError)
         {
@@ -246,6 +292,7 @@ namespace Xsolla.SDK.Store
             PurchaseParams purchaseParams = null;
 
             var locale = configuration.GetCurrentLocale();
+            var finalDeveloperPayload = args.developerPayload ?? developerPayload;
 
             // Xsolla API mixes up the definitions... yet again, this is a language code (e.g. `US`, `DE`, etc.).
             getPurchaseParams().locale = locale?.language;
@@ -256,10 +303,10 @@ namespace Xsolla.SDK.Store
             if (!string.IsNullOrEmpty(configuration.userId))
                 AddCustomParam("custom_user_id", configuration.userId);
 
-            if (!string.IsNullOrEmpty(developerPayload))
-                AddCustomParam("custom_payload", developerPayload);
+            if (!string.IsNullOrEmpty(finalDeveloperPayload))
+                AddCustomParam("custom_payload", finalDeveloperPayload);
 
-            if (!string.IsNullOrEmpty(args?.externalId))
+            if (!string.IsNullOrEmpty(args.externalId))
                 getPurchaseParams().external_id = args.externalId;
 
             if (args?.paymentMethodId != null && args.paymentMethodId >= 0)
@@ -359,7 +406,7 @@ namespace Xsolla.SDK.Store
                         .SetQuantity(orderStatus.content != null ? orderStatus.content.items[0].quantity : 1)
                         .SetStatus(XsollaStoreClientPurchasedProduct.Status.Paid)
                         .SetReceipt(receipt)
-                        .SetDeveloperPayload(developerPayload)
+                        .SetDeveloperPayload(finalDeveloperPayload)
                         .Build()
                 );
             }
@@ -389,16 +436,16 @@ namespace Xsolla.SDK.Store
         
         private void ConsumeProduct_(string sku, int quantity, string transactionId, ConsumeProductResultFunc onSuccess, ErrorFunc onError)
         {
-            XsollaLogger.Debug(Tag, "Consume");
+            XsollaLogger.Debug(Tag, $"Consume: sku={sku} quantity={quantity} transactionId={transactionId}");
 
             if (!configuration.settings.localPurchasesRestore)
             {
-                XsollaLogger.Debug(Tag, "Consume: ignore local purchases restore = false");
-                
+                XsollaLogger.Debug(Tag, $"Consume: ignore (localPurchasesRestore=false) sku={sku} quantity={quantity}");
+
                 onSuccess?.Invoke();
                 return;
             }
-            
+
             if (configuration.settings.webhooksMode == XsollaClientSettings.WebhooksMode.EventsApi)
             {
                 if (XsollaGetUpdates.transactionIdCache.TryGetValue(transactionId, out var cachedEvent) && cachedEvent.sku == sku)
@@ -432,10 +479,16 @@ namespace Xsolla.SDK.Store
                     instance_id = null
                 };
 
+                XsollaLogger.Debug(Tag, $"Consume: inventory consume sku={sku} quantity={quantity} in a single API call{(quantity > 1 ? " (collapsed multi-unit)" : "")}");
+
                 XsollaInventory.ConsumeInventoryItem(
                     _settings,
                     item: item,
-                    onSuccess: () => onSuccess?.Invoke(),
+                    onSuccess: () =>
+                    {
+                        XsollaLogger.Debug(Tag, $"Consume finished: sku={sku} quantity={quantity} consumed.");
+                        onSuccess?.Invoke();
+                    },
                     onError: error => onError?.Invoke(error.ToString())
                 );
             }
@@ -478,8 +531,9 @@ namespace Xsolla.SDK.Store
         public void Deinitialize(DeinitializeResultFunc onSuccess, ErrorFunc onError)
         {
             _authTokenFuture = null;
-            _productsRequestFuture = null;
-            
+            _products.Clear();
+            _productsGeneration++;
+
             onSuccess?.Invoke();
         }
 
@@ -668,14 +722,23 @@ namespace Xsolla.SDK.Store
 
         private ISimpleFuture<StoreItem[], Error> ProductsRequest_(string[] productIds)
         {
-            if (_productsRequestFuture != null)
-                return _productsRequestFuture;
-            
-            XsollaLogger.Debug(Tag, $"ProductsRequest: products={XsollaClientHelpers.ToJson(productIds)}");
-            
+            // Compute the not-yet-loaded SKUs WITHOUT recording them; recording happens only once the
+            // fetch succeeds (a failed fetch must not permanently flag its SKUs as loaded).
+            var newProductIds = new List<string>();
+            foreach (var productId in productIds)
+                if (!_products.Contains(productId) && !newProductIds.Contains(productId))
+                    newProductIds.Add(productId);
+
+            XsollaLogger.Debug(Tag, $"ProductsRequest: products={XsollaClientHelpers.ToJson(newProductIds.ToArray())}");
+
             var future = SimpleFuture.Create<StoreItem[], Error>(out var promise);
 
-            _productsRequestFuture = future;
+            if (newProductIds.Count == 0)
+            {
+                XsollaLogger.Debug(Tag, "ProductsRequest: all requested products already loaded, completing with empty result");
+                promise.Complete(new StoreItem[0]);
+                return future;
+            }
 
             var locale = configuration.GetCurrentLocale();
             var language = string.IsNullOrEmpty(locale?.language) ? null : locale.language;
@@ -683,10 +746,18 @@ namespace Xsolla.SDK.Store
 
             XsollaLogger.Debug(Tag, $"ProductsRequest: language={language} country={country} (default={LocaleInfo.Default.language}-{LocaleInfo.Default.country} fallback={configuration.fallbackToDefaultLocaleIfNotSet})");
 
+            var generation = _productsGeneration;
+            var fetch = XsollaStoreClientExtensionsProvider.Handler?.GetProductFetchSettings();
+
             XsollaCatalog.GetItems(
                 _settings,
                 onSuccess: items =>
                 {
+                    if (generation != _productsGeneration)
+                        return; // store was deinitialized mid-flight; drop the stale completion
+
+                    _products.AddRange(newProductIds);
+
                     var finalLocale = items.geoLocale ?? locale?.cultureInfo;
 
                     XsollaLogger.Debug(Tag, $"ProductsRequest_: finalLocale={finalLocale}");
@@ -702,18 +773,60 @@ namespace Xsolla.SDK.Store
                 },
                 onError: error =>
                 {
+                    if (generation != _productsGeneration)
+                        return; // store was deinitialized mid-flight; drop the stale completion
+
                     promise.CompleteWithError(error);
                 },
                 limit: PageLimit,
                 // This is actually a language (e.g. 'EN', 'DE', etc.), not a fully-fledged locale (e.g. 'en_US', 'de_DE').
                 locale: language,
                 country: country,
-                requestGeoLocale: configuration.fetchProductsWithGeoLocale
+                requestGeoLocale: configuration.fetchProductsWithGeoLocale,
+                productIds: newProductIds.ToArray(),
+                skipMissingProductsOnFetch: configuration.skipMissingProductsOnFetch,
+                maxSkusPerRequest: fetch?.EffectiveMaxItemsPerRequest ?? ProductFetchSettings.DefaultMaxItemsPerRequest,
+                maxParallelRequests: fetch?.EffectiveMaxParallelRequests ?? ProductFetchSettings.DefaultMaxParallelRequests,
+                retryPolicy: ToRetryPolicy(ResolveQueryProductsProfile())
             );
 
             return future;
         }
-        
+
+        // The store assembly can see the (internal) retry-policy types in the common assembly, so it
+        // resolves the configured QueryProducts profile here and hands the catalog a plain schedule.
+        private static RetryProfile ResolveQueryProductsProfile()
+        {
+            var policies = XsollaStoreClientExtensionsProvider.Handler?.GetRetryPolicies();
+            return policies?.queryProductsRetryProfileOverride
+                ?? policies?.defaultRetryProfileOverride
+                ?? RetryProfile.Default;
+        }
+
+        private static ProductFetchRetryPolicy ToRetryPolicy(RetryProfile profile)
+        {
+            switch (profile)
+            {
+                case RetryProfile.UniformImpl uniform:
+                    return new ProductFetchRetryPolicy((int)uniform.maxNumAttempts, _ => uniform.intervalMillis / 1000f);
+                case RetryProfile.ExponentialBackoffImpl backoff:
+                    return new ProductFetchRetryPolicy((int)backoff.maxNumAttempts, attempt =>
+                    {
+                        var delayMillis = (long)backoff.baseIntervalMillis << Math.Min(attempt, 30);
+                        if (backoff.maxIntervalMillis.HasValue)
+                            delayMillis = Math.Min(delayMillis, backoff.maxIntervalMillis.Value);
+
+                        var jitter = backoff.maxRandomExtraDelayMillis.HasValue
+                            ? UnityEngine.Random.Range(0, (int)backoff.maxRandomExtraDelayMillis.Value)
+                            : 0;
+
+                        return (delayMillis + jitter) / 1000f;
+                    });
+                default:
+                    return ProductFetchRetryPolicy.Default;
+            }
+        }
+
         #endregion
 
         private static XsollaSettings FillFromConfiguration(XsollaClientConfiguration configuration)

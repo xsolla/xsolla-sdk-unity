@@ -33,6 +33,9 @@ namespace Xsolla.SDK.Extensions
         {
             public RetryPolicies GetRetryPolicies() =>
                 XsollaStoreClientExtensionsManager.Instance().Settings.retryPolicies;
+
+            public ProductFetchSettings GetProductFetchSettings() =>
+                XsollaStoreClientExtensionsManager.Instance().Settings.productFetchSettings;
         }
     }
 }

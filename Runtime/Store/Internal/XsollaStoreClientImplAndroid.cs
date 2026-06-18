@@ -45,6 +45,19 @@ namespace Xsolla.SDK.Store
         {
             [CanBeNull, UsedImplicitly] public RetryPolicies retryPolicies;
 
+            // Unity governs the per-SKU fetch tunables for every platform: nulls are resolved to the
+            // Unity-side defaults here so native always receives concrete values and applies no defaults
+            // of its own.
+            [CanBeNull, UsedImplicitly] public ResolvedProductFetchSettings productFetchSettings;
+
+            [Serializable]
+            public class ResolvedProductFetchSettings
+            {
+                [UsedImplicitly] public int maxItemsPerRequest;
+                [UsedImplicitly] public int maxParallelRequests;
+                [UsedImplicitly] public long cacheTtlMillis;
+            }
+
             [CanBeNull]
             public static AdditionalSettings FromExtensions()
             {
@@ -52,9 +65,19 @@ namespace Xsolla.SDK.Store
                 if (extensionsHandler == null)
                     return null;
 
+                var fetch = extensionsHandler.GetProductFetchSettings();
                 return new AdditionalSettings
                 {
-                    retryPolicies = extensionsHandler.GetRetryPolicies()
+                    retryPolicies = extensionsHandler.GetRetryPolicies(),
+                    productFetchSettings = new ResolvedProductFetchSettings
+                    {
+                        maxItemsPerRequest = fetch?.EffectiveMaxItemsPerRequest
+                            ?? ProductFetchSettings.DefaultMaxItemsPerRequest,
+                        maxParallelRequests = fetch?.EffectiveMaxParallelRequests
+                            ?? ProductFetchSettings.DefaultMaxParallelRequests,
+                        cacheTtlMillis = fetch?.EffectiveCacheTtlMillis
+                            ?? ProductFetchSettings.DefaultCacheTtlMillis
+                    }
                 };
             }
         }
@@ -278,11 +301,13 @@ namespace Xsolla.SDK.Store
                 return;
             }
 
+            var finalDeveloperPayload = args.developerPayload ?? developerPayload;
+
             XsollaClientBridgeHelpersAndroid.AddCommonListenerCallback(
                 paymentListener,
                 "Purchase",
                 onSuccess: s => {
-                    var product = XsollaStoreClientHelpers.JsonToPurchase(s, developerPayload);
+                    var product = XsollaStoreClientHelpers.JsonToPurchase(s, finalDeveloperPayload);
                     AddReceiptToCache(product.transactionId, product.receipt);
                     onSuccess?.Invoke(product);
                 },
@@ -303,7 +328,7 @@ namespace Xsolla.SDK.Store
                     onError?.Invoke(error);
                 },
                 XsollaStoreClientHelpers.PurchaseToJson(sku,
-                    args.developerPayload ?? developerPayload,
+                    finalDeveloperPayload,
                     args.externalId, args.paymentToken,
                     args.paymentMethodId,
 #pragma warning disable CS0618 // Type or member is obsolete

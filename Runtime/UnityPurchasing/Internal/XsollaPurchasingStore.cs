@@ -29,6 +29,14 @@ namespace Xsolla.SDK.UnityPurchasing
         
         private readonly Dictionary<string, XsollaStoreClientProduct> _productById = new Dictionary<string, XsollaStoreClientProduct>();
 
+        // Unity IAP only hands FinishTransaction a transaction ID, but consuming a collapsed
+        // multi-unit restore needs the purchased quantity. Remember it per transaction here when the
+        // purchase is reported, then drain that many units in FinishTransaction.
+        // Not synchronized: every access (OnPurchaseSucceeded, FinishTransaction) runs on the Unity
+        // main thread, because the standalone client delivers all web-request callbacks via coroutine
+        // continuations. Same invariant as _productById above.
+        private readonly Dictionary<string, int> _quantityByTransactionId = new Dictionary<string, int>();
+
         [CanBeNull] private Action<IStoreCallback, string, string, string> onPurchaseSucceeded;
         [CanBeNull] private Action<IStoreCallback, PurchaseFailureDescription> onPurchaseFailed;
         
@@ -92,7 +100,9 @@ namespace Xsolla.SDK.UnityPurchasing
                 return;
             }
             
-            _productsFuture = SimpleFuture.Create<bool, string>(out var promise);
+            ISimplePromise<bool, string> promise = null;
+            if (_productsFuture == null)
+                _productsFuture = SimpleFuture.Create<bool, string>(out promise);
 
             _initializedFuture.OnComplete(
                 onSuccess: _ => RetrieveProducts_(),
@@ -115,10 +125,17 @@ namespace Xsolla.SDK.UnityPurchasing
                 // iOS restores automatically on start via the native SDK observer
                 productsRestorePromise.Complete(new XsollaStoreClientPurchasedProduct[0]);
 #else
-                _storeClient.RestorePurchases(
-                    onSuccess: items => productsRestorePromise.Complete(items),
-                    onError: error => productsRestorePromise.CompleteWithError(error)
-                );
+                if (promise != null)
+                {
+                    _storeClient.RestorePurchases(
+                        onSuccess: items => productsRestorePromise.Complete(items),
+                        onError: error => productsRestorePromise.CompleteWithError(error)
+                    );
+                }
+                else
+                {
+                    productsRestorePromise.Complete(new XsollaStoreClientPurchasedProduct[0]);
+                }
 #endif
 
                 _storeClient.FetchProducts(products.MapToArray(product => product.storeSpecificId),
@@ -140,6 +157,19 @@ namespace Xsolla.SDK.UnityPurchasing
                             var localizedPrice = (decimal) item.localizedPrice / 1_000_000;
 
                             if (items.inventory.FindFirst(it => it.sku == item.sku, out var purchasedItem)) {
+                                // This restore path reaches Unity IAP through OnProductsRetrieved (one
+                                // ProductDescription per SKU), not OnPurchaseSucceeded, so record the
+                                // quantity here too. Without this, FinishTransaction misses the map and
+                                // consumes 1. With collapse on, purchasedItem.quantity is the full count
+                                // and the SKU drains in a single restore; in split mode it is always 1
+                                // (only the first inventory row per SKU is surfaced here).
+                                if (!string.IsNullOrEmpty(purchasedItem.transactionId))
+                                {
+                                    var trackedQuantity = purchasedItem.quantity > 0 ? purchasedItem.quantity : 1;
+                                    _quantityByTransactionId[purchasedItem.transactionId] = trackedQuantity;
+                                    XsollaLogger.Debug(Tag, $"RetrieveProducts: tracking restored sku={item.sku} quantity={trackedQuantity} transactionId={purchasedItem.transactionId} (will consume {trackedQuantity} unit(s) on FinishTransaction)");
+                                }
+
                                 var receiptData = purchasedItem.ToReceipt().ToJson();
 
                                 return new ProductDescription(
@@ -168,13 +198,13 @@ namespace Xsolla.SDK.UnityPurchasing
                             );
                         }).ToList());
                         
-                        promise.Complete(true);
+                        promise?.Complete(true);
                     },
                     onError: error => {
                         XsollaLogger.Error(Tag, $"RetrieveProducts failed: {error}");
                         _storeCallback?.OnProductsRetrieved(new List<ProductDescription>());
                         
-                        promise.Complete(false);
+                        promise?.Complete(false);
                     }
                 );
             }
@@ -199,6 +229,9 @@ namespace Xsolla.SDK.UnityPurchasing
         private void OnPurchaseSucceeded(XsollaStoreClientPurchasedProduct product)
         {
             XsollaLogger.Debug(Tag, $"Purchase finished: {product}");
+
+            if (!string.IsNullOrEmpty(product.transactionId))
+                _quantityByTransactionId[product.transactionId] = product.quantity > 0 ? product.quantity : 1;
 
             _productsFuture?.OnComplete(
                 onSuccess: loaded =>
@@ -259,17 +292,45 @@ namespace Xsolla.SDK.UnityPurchasing
 
         public override void FinishTransaction(ProductDefinition product, string transactionId)
         {
-            XsollaLogger.Debug(Tag, "FinishTransaction");
+            var sku = product.storeSpecificId;
 
             if (product.type != ProductType.Consumable)
             {
-                XsollaLogger.Debug(Tag, "FinishTransaction: Product is not consumable. Ignoring.");
+                XsollaLogger.Debug(Tag, $"FinishTransaction: sku={sku} transactionId={transactionId} type={product.type} — not consumable, nothing to consume.");
+
+                // Non-consumables are never consumed, so drop any tracked quantity here to avoid leaking the entry.
+                if (!string.IsNullOrEmpty(transactionId))
+                    _quantityByTransactionId.Remove(transactionId);
+
                 return;
             }
 
-            _storeClient.ConsumeProduct(product.storeSpecificId, 1, transactionId,
-                onSuccess: () => XsollaLogger.Debug(Tag, $"FinishTransaction finished"),
-                onError: error => XsollaLogger.Error(Tag, $"FinishTransaction failed: {error}")
+            int quantity;
+            string quantitySource;
+            if (!string.IsNullOrEmpty(transactionId) && _quantityByTransactionId.TryGetValue(transactionId, out var tracked))
+            {
+                quantity = tracked;
+                quantitySource = quantity > 1 ? "collapsed multi-unit" : "tracked single unit";
+            }
+            else
+            {
+                quantity = 1;
+                quantitySource = "untracked, defaulting to 1";
+            }
+
+            XsollaLogger.Debug(Tag, $"FinishTransaction: consuming sku={sku} quantity={quantity} ({quantitySource}) transactionId={transactionId}");
+
+            _storeClient.ConsumeProduct(sku, quantity, transactionId,
+                onSuccess: () =>
+                {
+                    // Drop the entry only after a confirmed consume so a failed or repeated
+                    // FinishTransaction still drains the full multi-unit quantity instead of defaulting to 1.
+                    if (!string.IsNullOrEmpty(transactionId))
+                        _quantityByTransactionId.Remove(transactionId);
+
+                    XsollaLogger.Debug(Tag, $"FinishTransaction finished: sku={sku} consumed {quantity} unit(s) in a single consume.");
+                },
+                onError: error => XsollaLogger.Error(Tag, $"FinishTransaction failed: sku={sku} quantity={quantity} transactionId={transactionId}: {error}")
             );
         }
 

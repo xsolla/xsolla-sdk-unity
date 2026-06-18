@@ -213,11 +213,13 @@ namespace Xsolla.SDK.Store
         private static extern void _XsollaUnityBridgePurchase(string sku, string developerPayload, string externalId, int paymentMethod, string paymentToken, bool allowTokenOnlyFinishedStatusWithoutOrderId, XsollaClientBridgeHelpersIOS.XsollaUnityBridgeJsonCallbackDelegate callback, Int64 callbackData);
         public void PurchaseProduct(string sku, string developerPayload, XsollaStoreClientPurchaseArgs args, PurchaseProductResultFunc onSuccess, ErrorFunc onError)
         {
+	        var finalDeveloperPayload = developerPayload ?? args.developerPayload;
+
             _XsollaUnityBridgePurchase(
-                sku, developerPayload, args.externalId, args.paymentMethodId ?? -1, args.paymentToken, args.allowTokenOnlyFinishedStatusWithoutOrderId,
+                sku, finalDeveloperPayload, args.externalId, args.paymentMethodId ?? -1, args.paymentToken, args.allowTokenOnlyFinishedStatusWithoutOrderId,
                 callback: XsollaClientBridgeHelpersIOS.OnXsollaUnityBridgeJsonCallback, 
                 callbackData: XsollaClientBridgeHelpersIOS.CreateCallbackData("Purchase",
-                    onSuccess: result => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToPurchase(result, developerPayload)),
+                    onSuccess: result => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToPurchase(result, finalDeveloperPayload)),
                     onError: error => onError?.Invoke(error)
                 )
             );

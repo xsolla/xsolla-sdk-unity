@@ -121,7 +121,7 @@ namespace Xsolla.SDK.Common
                         );
 
                         bool CheckIfWarningAndroid() =>
-                            tag.Contains("android", StringComparison.OrdinalIgnoreCase) &&
+                            tag.ToLower().Contains("android") &&
                             (err.Contains("cancelled") || err.Contains("canceled"));
 
                         bool CheckIfWarningIOS() => false;

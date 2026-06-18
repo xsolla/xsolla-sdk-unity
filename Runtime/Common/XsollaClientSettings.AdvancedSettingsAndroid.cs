@@ -67,6 +67,10 @@ namespace Xsolla.SDK.Common
             /// This flag has no effect when the Events API is used for purchase tracking, as the
             /// Events API exposes individual transaction records directly and does not require
             /// any quantity expansion or collapsing workarounds.
+            /// <para/>
+            /// Superseded by the cross-platform <see cref="XsollaClientSettings.collapseRestoredMultiUnitPurchases"/>,
+            /// which drives both standalone and native Android. This Android-only key is kept as a
+            /// backward-compatible fallback; either flag enabling collapse is honored.
             /// </summary>
             public bool collapseRestoredMultiUnitPurchases;
 
@@ -193,6 +197,7 @@ namespace Xsolla.SDK.Common
             /// <c>true</c> to report the combined quantity as one notification per SKU;
             /// <c>false</c> (default) to expand into individual quantity-1 notifications.
             /// </param>
+            [Obsolete("Use XsollaClientSettings.Builder.SetCollapseRestoredMultiUnitPurchases — the cross-platform flag that also drives standalone.")]
             public AdvancedSettingsAndroid SetCollapseRestoredMultiUnitPurchases(bool collapseRestoredMultiUnitPurchases)
             {
                 this.collapseRestoredMultiUnitPurchases = collapseRestoredMultiUnitPurchases;

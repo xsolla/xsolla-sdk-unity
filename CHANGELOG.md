@@ -1,3 +1,23 @@
+## [3.1.16] - 2026-06-18
+
+### Added
+
+- Win/Mac/WebGL/Android: `collapseRestoredMultiUnitPurchases` on `XsollaClientSettings` — collapse restored multi-unit SKUs into one quantity notification (`true`) or one per unit (`false`, default)
+- Android: deprecated `AdvancedSettingsAndroid.SetCollapseRestoredMultiUnitPurchases` for `XsollaClientSettings.Builder.SetCollapseRestoredMultiUnitPurchases`; both are honored
+- Win/Mac/WebGL/Android: `XsollaStoreClientExtensionsSettings.Builder.SetProductFetchSettings(...)` — per-SKU fetch tunables `maxItemsPerRequest`, `maxParallelRequests`, `cacheTtlMillis` (defaults 50 / 4 / 1h); `cacheTtlMillis` is ignored on standalone (no cache)
+- Win/Mac/WebGL/Android: `XsollaClientConfiguration.Builder.SetSkipMissingProductsOnFetch(bool)` — when `true` (default), skips backend-reported non-existent SKUs and fails only if all are missing
+
+### Changed
+
+- Android: updated SDK to `3.0.46` (per-SKU product fetch)
+- Win/Mac/WebGL: per-SKU fetch retries transient failures (transport, 408/429/5xx) per the `QueryProducts` retry profile; a slow or failing batch no longer blocks sibling batches
+
+### Fixed
+
+- Win/Mac/WebGL: restore now consumes all owned units of a multi-unit SKU; previously one per launch without the Events API
+- `XsollaStoreClientPurchaseArgs.developerPayload` is now applied per purchase; previously the per-call override was ignored for the global payload
+- Win/Mac/WebGL: a failed fetch no longer marks its SKUs as loaded (recorded only on success); the dedup cache is cleared on `Deinitialize` so a re-initialized client refetches
+
 ## [3.1.15] - 2026-05-15
 
 ### Fixed

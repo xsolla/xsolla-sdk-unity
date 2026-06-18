@@ -310,4 +310,78 @@ namespace Xsolla.SDK.Common.Extensions
         /// <summary> Returns the JSON string representation. </summary>
         public override string ToString() => ToJson();
     }
+
+    /// <summary>
+    /// Tunables for the per-SKU product fetch (see <c>.docs/sku-optimization</c>). Unity is the single
+    /// authority that governs every platform: the standalone implementation and the native Android SDK
+    /// both consume these values; iOS does not support them yet.
+    /// <para/>
+    /// Each override field is nullable — leave it unset to use the Unity-governed default exposed by the
+    /// matching <c>Default*</c> constant. The <c>Effective*</c> accessors resolve a null override to that
+    /// default, so callers always read a concrete value.
+    /// <para/>
+    /// Lives in the Common assembly (like <see cref="RetryPolicies"/>) so the store-client extensions
+    /// handler can hand it to the platform implementations; the configurable instance is held by
+    /// <c>XsollaStoreClientExtensionsSettings.productFetchSettings</c>.
+    /// </summary>
+    [Serializable]
+    public class ProductFetchSettings
+    {
+        /// <summary>Max SKUs fetched per network request. Clamped to the backend limit of 50.</summary>
+        public const int DefaultMaxItemsPerRequest = 50;
+
+        /// <summary>Max product-fetch requests in flight at once for a single query.</summary>
+        public const int DefaultMaxParallelRequests = 4;
+
+        /// <summary>Time-to-live for cached product entries, in milliseconds (1 hour). Native cache only.</summary>
+        public const long DefaultCacheTtlMillis = 3_600_000;
+
+        /// <summary>
+        /// Max SKUs fetched per network request. Clamped to the backend limit of 50.
+        /// <para/>
+        /// <c>null</c> = <see cref="DefaultMaxItemsPerRequest"/> (50).
+        /// </summary>
+        public int? maxItemsPerRequest;
+
+        /// <summary>
+        /// Max product-fetch requests in flight at once for a single query.
+        /// <c>1</c> = strictly sequential; <c>N</c> = a sliding window of N.
+        /// <para/>
+        /// <c>null</c> = <see cref="DefaultMaxParallelRequests"/> (4).
+        /// </summary>
+        public int? maxParallelRequests;
+
+        /// <summary>
+        /// Time-to-live for cached product entries, in milliseconds, measured from when the entry was
+        /// cached.
+        /// <para/>
+        /// Android only — the standalone implementation does not cache fetched products, so this has no
+        /// effect there.
+        /// <para/>
+        /// <c>null</c> = <see cref="DefaultCacheTtlMillis"/> (1 hour).
+        /// </summary>
+        public long? cacheTtlMillis;
+
+        public int EffectiveMaxItemsPerRequest => maxItemsPerRequest ?? DefaultMaxItemsPerRequest;
+        public int EffectiveMaxParallelRequests => maxParallelRequests ?? DefaultMaxParallelRequests;
+        public long EffectiveCacheTtlMillis => cacheTtlMillis ?? DefaultCacheTtlMillis;
+
+        public ProductFetchSettings SetMaxItemsPerRequest(int? maxItemsPerRequest)
+        {
+            this.maxItemsPerRequest = maxItemsPerRequest;
+            return this;
+        }
+
+        public ProductFetchSettings SetMaxParallelRequests(int? maxParallelRequests)
+        {
+            this.maxParallelRequests = maxParallelRequests;
+            return this;
+        }
+
+        public ProductFetchSettings SetCacheTtlMillis(long? cacheTtlMillis)
+        {
+            this.cacheTtlMillis = cacheTtlMillis;
+            return this;
+        }
+    }
 }

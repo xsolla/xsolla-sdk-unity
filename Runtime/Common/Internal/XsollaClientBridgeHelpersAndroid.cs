@@ -25,18 +25,18 @@ namespace Xsolla.SDK.Common
             }
         }
 
-        public static readonly Lazy<AndroidActivity> androidActivity = new(() =>
+        public static readonly Lazy<AndroidActivity> androidActivity = new Lazy<AndroidActivity>(() =>
         {
             var javaClass = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
             var activity = javaClass.GetStatic<AndroidJavaObject>("currentActivity");
             return new AndroidActivity(activity);
         });
 
-        private static readonly Lazy<AndroidJavaObject> _androidStore = new(() =>
+        private static readonly Lazy<AndroidJavaObject> _androidStore = new Lazy<AndroidJavaObject>(() =>
             new AndroidJavaObject(BASE_CLASS_NAME, androidActivity.Value.activity)
         );
 
-        public static readonly Lazy<AndroidJavaClass> androidStoreClassLazy = new(() => new AndroidJavaClass(BASE_CLASS_NAME));
+        public static readonly Lazy<AndroidJavaClass> androidStoreClassLazy = new Lazy<AndroidJavaClass>(() => new AndroidJavaClass(BASE_CLASS_NAME));
 
         public static void JavaCall(string method, string json, XsollaUnityBridgeJsonCallback callback) =>
             JavaCall(_androidStore.Value, method, callback.onError, json, callback);
@@ -81,7 +81,7 @@ namespace Xsolla.SDK.Common
         }
 
         private static readonly Lazy<XsollaUnityBridgeJsonCallback> DummyLazy =
-            new(() => CreateCallback("Dummy", static _ => { }, static _ => { }));
+            new Lazy<XsollaUnityBridgeJsonCallback>(() => CreateCallback("Dummy", _ => { }, _ => { }));
 
         public static XsollaUnityBridgeJsonCallback Dummy => DummyLazy.Value;
 

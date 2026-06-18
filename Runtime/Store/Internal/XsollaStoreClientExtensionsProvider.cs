@@ -1,10 +1,14 @@
-﻿using Xsolla.SDK.Common.Extensions;
+﻿using JetBrains.Annotations;
+using Xsolla.SDK.Common.Extensions;
 
 namespace Xsolla.SDK.Store
 {
     internal interface IXsollaStoreClientExtensionsHandler
     {
         public RetryPolicies GetRetryPolicies();
+
+        [CanBeNull]
+        public ProductFetchSettings GetProductFetchSettings();
     }
     
     internal static class XsollaStoreClientExtensionsProvider

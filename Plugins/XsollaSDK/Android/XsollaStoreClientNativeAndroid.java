@@ -260,6 +260,13 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     private static boolean fetchProductsWithGeoLocale = false;
 
+    // Pre-existing per-query flag (per-sku-fetch-public-api.md §4), not one of the new §3 knobs:
+    // when true a fetch tolerates SKUs the backend reports as non-existent (skip + warn), failing
+    // only when all requested SKUs are missing. Read top-level from the C# config (wire key
+    // `skipNonExistentProductsOnQuery`), like the two product flags above. Default true matches
+    // the native default.
+    private static boolean skipNonExistentProductsOnQuery = true;
+
     @NonNull
     private static final AtomicBoolean forceNonSilentNextWidgetLogin = new AtomicBoolean(false);
 
@@ -391,6 +398,10 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .map(json -> json.optBoolean("fetchProductsWithGeoLocale", false))
             .orElse(false);
 
+        skipNonExistentProductsOnQuery = maybeJson
+            .map(json -> json.optBoolean("skipNonExistentProductsOnQuery", true))
+            .orElse(true);
+
         forceNonSilentNextWidgetLogin.set(false);
 
         final Optional<JSONObject> maybeAdvancedSettings =
@@ -455,9 +466,14 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .map(advancedSettings -> advancedSettings.optBoolean("redirectAppRelaunchEnabled"))
             .orElse(false);
 
-        collapseRestoredMultiUnitPurchases = maybeAdvancedSettings
-            .map(advancedSettings -> advancedSettings.optBoolean("collapseRestoredMultiUnitPurchases"))
-            .orElse(false);
+        // Canonical flag lives on XsollaClientSettings (settings.collapseRestoredMultiUnitPurchases),
+        // shared with the standalone implementation. The AdvancedSettingsAndroid key is kept as a
+        // backward-compatible fallback; either one enabling collapse is honored.
+        collapseRestoredMultiUnitPurchases = maybeSettingsJson
+            .map(settingsJson -> settingsJson.optBoolean("collapseRestoredMultiUnitPurchases"))
+            .orElse(false) || maybeAdvancedSettings
+                .map(advancedSettings -> advancedSettings.optBoolean("collapseRestoredMultiUnitPurchases"))
+                .orElse(false);
 
         logDebug("Initialize: " + argsJson);
         logDebug("SimpleMode: " + simpleMode);
@@ -469,11 +485,25 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         logDebug("FetchPersonalizedProductsOnly: " + fetchPersonalizedProductsOnly);
         logDebug("TrackingId: " + (trackingId != null ? trackingId : "N/A"));
         logDebug("FetchProductsWithGeoLocale: " + fetchProductsWithGeoLocale);
+        logDebug("SkipNonExistentProductsOnQuery: " + skipNonExistentProductsOnQuery);
         logDebug("QueryCancellationReasonEnabled: " + queryCancellationReasonEnabled);
         logDebug("RedirectAppRelaunchEnabled: " + redirectAppRelaunchEnabled);
         logDebug("CollapseRestoredMultiUnitPurchases: " + collapseRestoredMultiUnitPurchases);
 //      logDebug("InvokePurchasesUpdatedIfOrderIdMissing: " + fetchProductsWithGeoLocale);
         logDebug("AdditionalSettings: " + maybeAdditionalSettingsJson.orElse(null));
+
+        // Per-SKU product-fetch tunables. Unity governs them for every platform and resolves nulls to
+        // its own defaults before sending concrete values in the additional settings, so the bridge
+        // applies exactly what it receives and owns no defaults. When the object is absent (no extensions
+        // configured) native's own builder defaults apply.
+        final Optional<JSONObject> maybeProductFetchSettings =
+            maybeAdditionalSettingsJson.flatMap(json -> JsonHelper.getChildObject(json, "productFetchSettings"));
+
+        maybeProductFetchSettings.ifPresent(settings ->
+            logDebug("ProductFetch: maxItemsPerRequest=" + settings.optInt("maxItemsPerRequest")
+                + " maxParallelRequests=" + settings.optInt("maxParallelRequests")
+                + " cacheTtlMillis=" + settings.optLong("cacheTtlMillis"))
+        );
 
         // If there's an existing instance for some reason,
         // shut it down gracefully.
@@ -485,11 +515,22 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .newBuilder(activity)
             .setConfig(config
                 .map(config_ -> config_
-                    .withCommon(common -> common
-                        .withDebugEnabled(debug.orElse(false))
-                        .withRetryPolicies(maybeRetryPolicies.orElse(null))
-                        .withCollapseRestoredMultiUnitPurchases(collapseRestoredMultiUnitPurchases)
-                    )
+                    .withCommon(common -> {
+                        var updatedCommon = common
+                            .withDebugEnabled(debug.orElse(false))
+                            .withRetryPolicies(maybeRetryPolicies.orElse(null))
+                            .withCollapseRestoredMultiUnitPurchases(collapseRestoredMultiUnitPurchases);
+
+                        if (maybeProductFetchSettings.isPresent()) {
+                            final JSONObject fetch = maybeProductFetchSettings.get();
+                            updatedCommon = updatedCommon
+                                .withMaxItemsPerProductRequest(fetch.optInt("maxItemsPerRequest"))
+                                .withMaxParallelProductRequests(fetch.optInt("maxParallelRequests"))
+                                .withProductCacheTtlMillis(fetch.optLong("cacheTtlMillis"));
+                        }
+
+                        return updatedCommon;
+                    })
                     .withPayments(payments -> {
                         ConfigWithoutIntegration.Payments.Activity newActivity = payments.getActivity();
                         if (newActivity == null) {
@@ -1643,13 +1684,15 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
             final boolean fetchPersonalizedProductsOnly = json.optBoolean("fetchPersonalizedProductsOnly", true);
             final boolean fetchProductsWithGeoLocale = json.optBoolean("fetchProductsWithGeoLocale");
+            final boolean skipNonExistentProductsOnQuery = json.optBoolean("skipNonExistentProductsOnQuery", true);
 
             final var config = Config.Common.getDefault()
                 .withSandboxEnabled(sandbox)
                 .withLocaleOverride(LocaleInfo.parse(locale).getRightOr((LocaleInfo) null))
                 .withLogLevel(logLevel.equals("Debug") ? LogLevel.VERBOSE : LogLevel.ERROR)
                 .withFetchPersonalizedProductsOnly(fetchPersonalizedProductsOnly)
-                .withUseGeoLocaleOnProductQuery(fetchProductsWithGeoLocale);
+                .withUseGeoLocaleOnProductQuery(fetchProductsWithGeoLocale)
+                .withSkipNonExistentProductsOnQuery(skipNonExistentProductsOnQuery);
 
             final var backText = redirectSettings.map( s -> s.optString("redirectButtonText")).orElse("");
             final var redirectDelay = redirectSettings.map( s -> s.optInt("redirectDelay")).orElse(6);

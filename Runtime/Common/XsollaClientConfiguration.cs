@@ -74,6 +74,17 @@ namespace Xsolla.SDK.Common
 
         public bool fetchPersonalizedProductsOnly = true;
 
+        /// <summary>
+        /// When <c>true</c>, a product fetch succeeds even if some requested SKUs don't exist
+        /// (they are skipped and a warning is logged); the fetch fails only when <em>all</em>
+        /// requested SKUs are missing. When <c>false</c>, any missing SKU fails the whole fetch.
+        /// <para/>
+        /// Default <c>true</c>, matching the backend behavior. Honored by the standalone and
+        /// Android implementations; iOS does not support this yet.
+        /// </summary>
+        [JsonProperty("skipNonExistentProductsOnQuery")]
+        public bool skipMissingProductsOnFetch = true;
+
         public string customPayStationDomainProduction = null;
         public string customPayStationDomainSandbox = null;
 
@@ -199,7 +210,17 @@ namespace Xsolla.SDK.Common
                 _configuration.fetchPersonalizedProductsOnly = fetchPersonalizedProductsOnly;
                 return this;
             }
-            
+
+            /// <summary>
+            /// Controls whether a product fetch tolerates requested SKUs that don't exist.
+            /// See <see cref="skipMissingProductsOnFetch"/>.
+            /// </summary>
+            public Builder SetSkipMissingProductsOnFetch(bool skipMissingProductsOnFetch)
+            {
+                _configuration.skipMissingProductsOnFetch = skipMissingProductsOnFetch;
+                return this;
+            }
+
             /// <summary>
             /// Overrides the Pay Station domain used to open the payment UI for both environments.
             ///

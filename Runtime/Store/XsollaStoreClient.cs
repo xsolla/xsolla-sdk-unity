@@ -139,6 +139,41 @@ namespace Xsolla.SDK.Store
         }
 
         /// <summary>
+        /// Fetches additional products, skipping any that have already been loaded.
+        /// </summary>
+        /// <param name="products">Array of product SKUs to fetch.</param>
+        /// <param name="completionHandler">Callback with the fetched products array and error. Returns an empty array when there are no new products to fetch.</param>
+        public void FetchAdditionalProducts(string[] products, Action<XsollaStoreClientProduct[], XsollaStoreClientError> completionHandler)
+        {
+            var newProducts = new List<string>();
+            if (products != null)
+            {
+                foreach (var product in products)
+                {
+                    if (_products.Contains(product))
+                        continue;
+
+                    newProducts.Add(product);
+                }
+            }
+
+            if (newProducts.Count == 0)
+            {
+                completionHandler?.Invoke(new XsollaStoreClientProduct[0], null);
+                return;
+            }
+
+            _storeImpl.FetchProducts(newProducts.ToArray(),
+                onSuccess: items =>
+                {
+                    _products.AddRange(newProducts);
+                    completionHandler?.Invoke(items, null);
+                },
+                onError: error => completionHandler?.Invoke(null, XsollaStoreClientError.Message(error))
+            );
+        }
+
+        /// <summary>
         /// Purchases a product by ID.
         /// </summary>
         /// <param name="productId">Product ID (SKU).</param>

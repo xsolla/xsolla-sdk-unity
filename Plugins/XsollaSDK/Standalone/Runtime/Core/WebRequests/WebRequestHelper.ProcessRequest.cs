@@ -144,7 +144,10 @@ namespace Xsolla.Core
 
 			if (isHttpError)
 			{
-				error = Error.UnknownError;
+				// Carry the HTTP status so a body-less / non-JSON non-2xx (typical gateway 429/503) stays
+				// classifiable downstream. ErrorType is unchanged, so existing ErrorType-branching callers
+				// are unaffected; only the previously-empty statusCode is now populated.
+				error = new Error(ErrorType.UnknownError, statusCode: webRequest.responseCode.ToString());
 				return false;
 			}
 

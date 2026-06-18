@@ -1,6 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using UnityEngine;
 using Xsolla.Core;
 
@@ -9,6 +11,18 @@ namespace Xsolla.Catalog
 	internal static class XsollaCatalog
 	{
 		private const string BaseUrl = "https://store.xsolla.com/api/v2/project";
+
+		// Test seam for the per-chunk page fetch. Production keeps the real GetPaginatedItems, so there
+		// is no behavior change; tests swap this to script chunk outcomes (has_more, transient errors,
+		// absent SKUs) and exercise the window/drain/retry orchestration without a live backend. Both the
+		// SKU window and the full-catalog pager route through it; the internal token-refresh recursion
+		// inside GetPaginatedItems deliberately does not (that path retries the real request).
+		internal static Action<XsollaSettings, Action<StoreItems>, Action<Error>,
+			int, int, string, string, string, bool, SdkType, string[]> PaginatedItemsRequester = GetPaginatedItems;
+
+		// Per-query correlation id for the SKU-fetch trace, so concurrent GetItems calls stay readable in
+		// the log. Main-thread only; no synchronization needed.
+		private static int _skuFetchSequence;
 
 		/// <summary>
 		/// Returns a full list of virtual items.
@@ -23,8 +37,13 @@ namespace Xsolla.Catalog
 		/// <param name="additionalFields">The list of additional fields. These fields will be in a response if you send them in a request. Available fields `media_list`, `order`, and `long_description`.</param>
 		/// <param name="requestGeoLocale">Should the locale be detected automatically by Xsolla remote services using the geolocation?</param>
 		/// <param name="sdkType">SDK type. Used for internal analytics.</param>
+		/// <param name="productIds">Optional list of SKUs to request specific items via <c>sku[]</c> query parameters. When <c>null</c> or empty, the full catalog is requested. SKUs are split into batches and requested across multiple calls (a bounded-parallel sliding window); the results are aggregated in request order.</param>
+		/// <param name="skipMissingProductsOnFetch">When <c>true</c> (default), SKUs the backend reports as non-existent are skipped with a warning; the fetch fails only when <em>every</em> requested SKU is missing. When <c>false</c>, any missing SKU fails the whole fetch. Applies to the SKU-filtered path only.</param>
+		/// <param name="maxSkusPerRequest">SKUs per batch request. Clamped to the backend limit of 50. Applies to the SKU-filtered path only.</param>
+		/// <param name="maxParallelRequests">Maximum batch requests in flight at once for this query (1 = strictly sequential). Applies to the SKU-filtered path only.</param>
+		/// <param name="retryPolicy">Per-chunk transient-failure retry schedule. When <c>null</c>, <see cref="ProductFetchRetryPolicy.Default"/> is used. Applies to the SKU-filtered path only.</param>
 		public static void GetItems(
-			XsollaSettings settings, 
+			XsollaSettings settings,
 	        Action<StoreItems> onSuccess,
 	        Action<Error> onError,
 	        int limit = 50,
@@ -32,54 +51,350 @@ namespace Xsolla.Catalog
 	        string country = null,
 	        string additionalFields = "long_description",
 	        bool requestGeoLocale = false,
-	        SdkType sdkType = SdkType.Store
+	        SdkType sdkType = SdkType.Store,
+	        string[] productIds = null,
+	        bool skipMissingProductsOnFetch = true,
+	        int maxSkusPerRequest = 50,          // backend hard limit; canonical default ProductFetchSettings.DefaultMaxItemsPerRequest
+	        int maxParallelRequests = 4,         // canonical default ProductFetchSettings.DefaultMaxParallelRequests (store layer overrides)
+	        ProductFetchRetryPolicy retryPolicy = null
 	    )
 		{
-			var items = new List<StoreItem>();
-			var offset = 0;
+			maxSkusPerRequest = Mathf.Clamp(maxSkusPerRequest, 1, 50);
+			maxParallelRequests = Mathf.Max(1, maxParallelRequests);
+			retryPolicy ??= ProductFetchRetryPolicy.Default;
+
 			CultureInfo geoLocale = null;
 
-			processRequest();
-			return;
-
-			void processRequest()
+			// No SKU filter: request the full catalog page by page (sequentially, since the
+			// total number of pages is not known up front).
+			if (productIds == null || productIds.Length == 0)
 			{
-				GetPaginatedItems(
-					settings,
-					handleResponse,
-					onError,
-					limit,
-					offset,
-					locale,
-					country,
-					additionalFields,
-					requestGeoLocale,
-					sdkType
-				);
-			}
+				var items = new List<StoreItem>();
+				var offset = 0;
 
-			void handleResponse(StoreItems response)
-			{
-				items.AddRange(response.items);
+				processRequest();
+				return;
 
-		        if (requestGeoLocale && geoLocale == null)
-		        {
-		            geoLocale = response.geoLocale;
-		        }
-
-				if (!response.has_more)
+				void processRequest()
 				{
+					PaginatedItemsRequester(
+						settings,
+						handleResponse,
+						onError,
+						limit,
+						offset,
+						locale,
+						country,
+						additionalFields,
+						requestGeoLocale,
+						sdkType,
+						null
+					);
+				}
+
+				void handleResponse(StoreItems response)
+				{
+					items.AddRange(response.items);
+
+					if (requestGeoLocale && geoLocale == null)
+						geoLocale = response.geoLocale;
+
+					if (response.has_more)
+					{
+						offset += limit;
+						processRequest();
+						return;
+					}
+
 					onSuccess(new StoreItems {
 						has_more = false,
 						items = items.ToArray(),
 						geoLocale = geoLocale
 					});
 				}
+			}
+
+			// SKU filter: split into batches and request them with a bounded-parallel sliding window.
+			// Each batch returns at most one page, so the requests are independent. At most
+			// maxParallelRequests batches are in flight; the next batch starts as each one settles
+			// (on success OR failure — Layer A does not short-circuit). Per-batch outcomes are captured
+			// and assembled once every batch settles; query-level short-circuit (Layer B) happens there.
+			var fetchId = ++_skuFetchSequence;
+
+			var batches = new List<string[]>();
+			for (var i = 0; i < productIds.Length; i += maxSkusPerRequest)
+				batches.Add(productIds.Skip(i).Take(maxSkusPerRequest).ToArray());
+
+			if (batches.Count == 0)
+			{
+				// No real SKUs to request (e.g. an all-empty/whitespace array): never enter the window
+				// with nothing to settle, otherwise complete() would never fire and the caller hangs.
+				XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: no SKUs to request, returning empty");
+				onSuccess(new StoreItems {
+					has_more = false,
+					items = Array.Empty<StoreItem>(),
+					geoLocale = geoLocale
+				});
+				return;
+			}
+
+			XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: {productIds.Length} SKU(s) -> {batches.Count} batch(es) of <={maxSkusPerRequest}, parallel<={maxParallelRequests}, retry<={retryPolicy.MaxAttempts} attempt(s)");
+
+			var batchResults = new List<StoreItem>[batches.Count];
+			var batchErrors = new Error[batches.Count];
+			for (var b = 0; b < batches.Count; b++)
+				batchResults[b] = new List<StoreItem>();
+
+			var settled = new bool[batches.Count];
+			var completed = false;
+			var remaining = batches.Count;
+			var nextBatch = 0;
+
+			for (var i = 0; i < maxParallelRequests && nextBatch < batches.Count; i++)
+			{
+				var next = nextBatch++;
+				requestBatch(next, batches[next]);
+			}
+
+			return;
+
+			void requestBatch(int index, string[] skus)
+			{
+				var inFlight = nextBatch - (batches.Count - remaining);
+				XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: -> batch {index} requesting {skus.Length} SKU(s) [{inFlight}/{maxParallelRequests} in flight, {remaining} not settled]");
+
+				GetItemsChunkWithRetry(
+					settings,
+					skus,
+					skus.Length,
+					locale,
+					country,
+					additionalFields,
+					requestGeoLocale,
+					sdkType,
+					retryPolicy,
+					fetchId,
+					response =>
+					{
+						batchResults[index].AddRange(response.items);
+
+						if (requestGeoLocale && geoLocale == null)
+							geoLocale = response.geoLocale;
+
+						XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: <- batch {index} returned {response.items?.Length ?? 0} item(s){(response.has_more ? " (has_more)" : "")}");
+
+						// Defensive: a bounded sku[] request should never return has_more. If it does,
+						// drain only the SKUs of this chunk still missing (a strictly smaller set, since
+						// batchResults accumulates across rounds), re-entering without settling.
+						if (response.has_more)
+						{
+							var fetched = new HashSet<string>();
+							foreach (var item in batchResults[index])
+								fetched.Add(item.sku);
+							var missing = batches[index].Where(s => !fetched.Contains(s)).ToArray();
+
+							// Re-request only while making progress and something remains; otherwise the
+							// leftover SKUs are genuinely absent and AssembleSkuResults confirms them.
+							if (missing.Length > 0 && missing.Length < skus.Length)
+							{
+								XDebug.LogWarning(settings, $"[Catalog] sku-fetch #{fetchId}: batch {index} returned has_more for a bounded sku[] request; draining {missing.Length} remaining SKU(s)");
+								requestBatch(index, missing);
+								return;
+							}
+						}
+
+						settleBatch(index);
+					},
+					error =>
+					{
+						// Carry the failure for this batch; do NOT abort the siblings.
+						XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: <- batch {index} failed: {error} (window keeps siblings running; query fails at assembly)");
+						batchErrors[index] = error;
+						settleBatch(index);
+					});
+			}
+
+			void settleBatch(int index)
+			{
+				// Ignore a double settle (paging re-entry already settled) or any settle that lands
+				// after the query already completed (e.g. a delayed retry resolving post-completion).
+				if (completed || settled[index])
+					return;
+				settled[index] = true;
+
+				remaining--;
+				if (remaining == 0)
+					complete();
+				else if (nextBatch < batches.Count)
+				{
+					var next = nextBatch++;
+					requestBatch(next, batches[next]);
+				}
+			}
+
+			void complete()
+			{
+				completed = true;
+
+				var assembly = AssembleSkuResults(productIds, batches, batchResults, batchErrors, skipMissingProductsOnFetch, settings);
+				if (assembly.IsSuccess)
+				{
+					XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: done - assembled {assembly.Items.Length}/{productIds.Length} item(s) across {batches.Count} batch(es)");
+					onSuccess(new StoreItems {
+						has_more = false,
+						items = assembly.Items,
+						geoLocale = geoLocale
+					});
+				}
 				else
 				{
-					offset += limit;
-					processRequest();
+					XDebug.LogDebug(settings, $"[Catalog] sku-fetch #{fetchId}: done - FAILED across {batches.Count} batch(es): {assembly.Error}");
+					onError(assembly.Error);
 				}
+			}
+		}
+
+		internal readonly struct SkuAssemblyResult
+		{
+			public readonly StoreItem[] Items;
+			public readonly Error Error;
+			public bool IsSuccess => Error == null;
+
+			private SkuAssemblyResult(StoreItem[] items, Error error)
+			{
+				Items = items;
+				Error = error;
+			}
+
+			public static SkuAssemblyResult Success(StoreItem[] items) => new SkuAssemblyResult(items, null);
+			public static SkuAssemblyResult Failure(Error error) => new SkuAssemblyResult(null, error);
+		}
+
+		// Pure three-way assembly over per-batch outcomes (present / confirmed-absent / failed-chunk),
+		// in request order. Layer B short-circuit: the first failed SKU fails the whole query. Then
+		// confirmed-absent SKUs are skipped+warned or fail the query per skipMissingProductsOnFetch;
+		// an all-absent result is never a valid empty success.
+		internal static SkuAssemblyResult AssembleSkuResults(
+			string[] productIds,
+			List<string[]> batches,
+			List<StoreItem>[] batchResults,
+			Error[] batchErrors,
+			bool skipMissingProductsOnFetch,
+			XsollaSettings settings)
+		{
+			// SKU -> present item (batches hold disjoint SKU sets, so last-wins is harmless).
+			var present = new Dictionary<string, StoreItem>(StringComparer.Ordinal);
+			foreach (var result in batchResults)
+				foreach (var item in result)
+					if (item?.sku != null)
+						present[item.sku] = item;
+
+			// A failed batch poisons exactly its own requested SKUs.
+			var failedSku = new Dictionary<string, Error>(StringComparer.Ordinal);
+			for (var b = 0; b < batches.Count; b++)
+				if (batchErrors[b] != null)
+					foreach (var sku in batches[b])
+						failedSku[sku] = batchErrors[b];
+
+			// Layer B short-circuit: the first failure in request order fails the whole query.
+			foreach (var sku in productIds)
+				if (failedSku.TryGetValue(sku, out var batchError))
+					return SkuAssemblyResult.Failure(batchError);
+
+			var assembled = new List<StoreItem>();
+			var missing = new List<string>();
+			foreach (var sku in productIds)
+			{
+				if (present.TryGetValue(sku, out var item))
+					assembled.Add(item);
+				else
+					missing.Add(sku); // requested, not failed, not returned => confirmed-absent
+			}
+
+			if (missing.Count > 0)
+			{
+				if (!skipMissingProductsOnFetch)
+					return SkuAssemblyResult.Failure(new Error(ErrorType.ProductDoesNotExist,
+						errorMessage: $"Requested products do not exist: {string.Join(", ", missing)}"));
+
+				XDebug.LogWarning(settings, $"[Catalog] skipping {missing.Count} non-existent SKU(s): {string.Join(", ", missing)}");
+			}
+
+			// All-absent is never a valid empty success, even with skip on.
+			if (assembled.Count == 0)
+				return SkuAssemblyResult.Failure(new Error(ErrorType.ProductDoesNotExist,
+					errorMessage: "No requested products could be fetched"));
+
+			return SkuAssemblyResult.Success(assembled.ToArray());
+		}
+
+		// Wraps GetPaginatedItems with per-chunk transient retry driven by the resolved retry policy.
+		// Sits below the assembly window, so transients are absorbed before any outcome reaches complete().
+		private static void GetItemsChunkWithRetry(
+			XsollaSettings settings,
+			string[] chunk,
+			int limit,
+			string locale,
+			string country,
+			string additionalFields,
+			bool requestGeoLocale,
+			SdkType sdkType,
+			ProductFetchRetryPolicy retryPolicy,
+			int fetchId,
+			Action<StoreItems> onSuccess,
+			Action<Error> onError,
+			int attempt = 0)
+		{
+			PaginatedItemsRequester(
+				settings,
+				onSuccess,
+				error =>
+				{
+					if (IsTransient(error) && attempt + 1 < retryPolicy.MaxAttempts)
+					{
+						var delay = retryPolicy.DelaySeconds(attempt);
+						XDebug.Log(settings, $"[Catalog] sku-fetch #{fetchId}: transient {error}; retry {attempt + 1}/{retryPolicy.MaxAttempts - 1} in {delay:0.00}s");
+						CoroutinesExecutor.Run(RetryAfter(delay, () =>
+							GetItemsChunkWithRetry(settings, chunk, limit, locale, country,
+								additionalFields, requestGeoLocale, sdkType, retryPolicy, fetchId,
+								onSuccess, onError, attempt + 1)));
+					}
+					else
+						onError(error);
+				},
+				limit,
+				0,
+				locale,
+				country,
+				additionalFields,
+				requestGeoLocale,
+				sdkType,
+				chunk);
+		}
+
+		private static IEnumerator RetryAfter(float seconds, Action action)
+		{
+			yield return new WaitForSeconds(seconds);
+			action();
+		}
+
+		// Transient = transport unreachable + 408 + 429 + 5xx. Everything else is absolute.
+		internal static bool IsTransient(Error error)
+		{
+			if (error.ErrorType == ErrorType.NetworkError)
+				return true;
+
+			switch (error.statusCode)
+			{
+				case "408":
+				case "429":
+				case "500":
+				case "502":
+				case "503":
+				case "504":
+					return true;
+				default:
+					return false;
 			}
 		}
 
@@ -99,6 +414,7 @@ namespace Xsolla.Catalog
 		/// <param name="additionalFields">The list of additional fields. These fields will be in a response if you send them in a request. Available fields `media_list`, `order`, and `long_description`.</param>
 		/// <param name="requestGeoLocale">See `requestGeoLocale` in <see cref="GetItems"/>.</param>
 		/// <param name="sdkType">SDK type. Used for internal analytics.</param>
+		/// <param name="productIds">Optional list of SKUs to request specific items via <c>sku[]</c> query parameters. When <c>null</c> or empty, the full catalog page is requested. This is a single request, so the caller is responsible for keeping the list within the API limit of 50 SKUs.</param>
 		public static void GetPaginatedItems(
 			XsollaSettings settings, 
 	        Action<StoreItems> onSuccess,
@@ -108,7 +424,8 @@ namespace Xsolla.Catalog
 	        string country = null,
 	        string additionalFields = "long_description",
 	        bool requestGeoLocale = false,
-	        SdkType sdkType = SdkType.Store
+	        SdkType sdkType = SdkType.Store,
+	        string[] productIds = null
 	    )
 		{
 			var url = new UrlBuilder($"{BaseUrl}/{settings.StoreProjectId}/items/virtual_items")
@@ -118,6 +435,7 @@ namespace Xsolla.Catalog
 				.AddCountry(country)
 				.AddAdditionalFields(additionalFields)
 				.AddParam("with_geo", requestGeoLocale.ToString())
+				.AddArray("sku", productIds)
 				.Build();
 
 			WebRequestHelper.Instance.GetRequest<StoreItems>(
@@ -162,7 +480,7 @@ namespace Xsolla.Catalog
 		            }
 		        },
 				onError: error => TokenAutoRefresher.Check(settings, error, onError, () =>
-		            GetPaginatedItems(settings, onSuccess, onError, limit, offset, locale, country, additionalFields, requestGeoLocale, sdkType)
+		            GetPaginatedItems(settings, onSuccess, onError, limit, offset, locale, country, additionalFields, requestGeoLocale, sdkType, productIds)
 		        ),
 				errorsToCheck: ErrorGroup.ItemsListErrors);
 		}

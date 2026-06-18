@@ -18,7 +18,7 @@ namespace Xsolla.SDK.Extensions
     /// Use <see cref="Builder"/> to construct and optionally apply settings to the SDK.
     /// </summary>
     [Serializable]
-    public class XsollaStoreClientExtensionsSettings 
+    public class XsollaStoreClientExtensionsSettings
     {
         public enum RetryProfileType
         {
@@ -29,8 +29,8 @@ namespace Xsolla.SDK.Extensions
             QueryProducts,
             QueryPurchases,
             ConsumePurchases
-        } 
-        
+        }
+
         public class Builder
         {
             private XsollaStoreClientExtensionsSettings _settings = new XsollaStoreClientExtensionsSettings();
@@ -93,12 +93,24 @@ namespace Xsolla.SDK.Extensions
                 return this;
             }
 
+            /// <summary>
+            /// Sets the per-SKU product fetch tunables. Standalone and Android only; iOS does not support
+            /// these yet. Pass <c>null</c> to keep the Unity-governed defaults (see
+            /// <see cref="ProductFetchSettings"/>).
+            /// </summary>
+            public Builder SetProductFetchSettings([CanBeNull] ProductFetchSettings settings)
+            {
+                _settings.productFetchSettings = settings;
+                return this;
+            }
+
             public XsollaStoreClientExtensionsSettings Build() => _settings;
             public static XsollaStoreClientExtensionsSettings Empty() => Create().Build();
         }
 
         [CanBeNull] internal RetryPolicies retryPolicies;
         [CanBeNull] internal Action<XsollaStoreClientEventTypes, object> eventsCallback;
+        [CanBeNull] internal ProductFetchSettings productFetchSettings;
 
         /// <summary> Serializes to JSON. </summary>
         /// <returns>JSON string representation.</returns>
