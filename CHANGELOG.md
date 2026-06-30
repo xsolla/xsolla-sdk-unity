@@ -1,3 +1,9 @@
+## [3.1.17] - 2026-06-30
+
+### Fixed
+
+- Win/Mac/WebGL: login widget close event no longer fires before the token is received
+
 ## [3.1.16] - 2026-06-18
 
 ### Added

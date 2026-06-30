@@ -19,23 +19,69 @@ mergeInto(LibraryManager.library, {
             alert("The popup window was blocked by the browser. Please allow popups for this site.");
             return;
         }
-    
-        window.addEventListener("message", function (event) {
+
+        var finished = false;
+
+        function cleanup() {
+            if (closePoll) {
+                clearInterval(closePoll);
+                closePoll = null;
+            }
+            window.removeEventListener("message", messageHandler, false);
+        }
+
+        function messageHandler(event) {
             if (event.data && event.data.type === 'xsolla-widget-auth') {
+                if (finished) return;
+                finished = true;
+                cleanup();
+
                 var token = event.data.data;
                 if (typeof XSOLLA_SDK_DEBUG !== 'undefined' && XSOLLA_SDK_DEBUG) {
                     console.log("[Xsolla SDK] Auth token received from widget proxy page:", token);
                 }
+
+                // The widget page does not close itself after a successful login, so close it here.
+                if (popup && !popup.closed) {
+                    popup.close();
+                }
+
                 SendMessage('XsollaWebCallbacks', 'PublishWidgetAuthSuccess', token);
             }
             if (event.data && event.data.type === 'xsolla-widget-auth-close') {
-                var token = event.data.data;
+                if (finished) return;
+                finished = true;
+                cleanup();
+
                 if (typeof XSOLLA_SDK_DEBUG !== 'undefined' && XSOLLA_SDK_DEBUG) {
-                    console.log("[Xsolla SDK] Auth token received from widget proxy page:", token);
+                    console.log("[Xsolla SDK] Widget closed by user");
                 }
+
                 SendMessage('XsollaWebCallbacks', 'PublishWidgetAuthCancel');
             }
-        }, false);
+        }
+
+        window.addEventListener("message", messageHandler, false);
+
+        var closePoll = setInterval(function () {
+            if (!popup || !popup.closed) {
+                return;
+            }
+
+            if (finished) {
+                cleanup();
+                return;
+            }
+
+            finished = true;
+            cleanup();
+
+            if (typeof XSOLLA_SDK_DEBUG !== 'undefined' && XSOLLA_SDK_DEBUG) {
+                console.log("[Xsolla SDK] Popup window closed by user");
+            }
+
+            SendMessage('XsollaWebCallbacks', 'PublishWidgetAuthCancel');
+        }, 500);
     },
     
     OpenXsollaLoginWidgetPopupWithConfirmation: function (projectIdPtr, localePtr, popupMessageTextPtr, continueButtonTextPtr, cancelButtonTextPtr) {

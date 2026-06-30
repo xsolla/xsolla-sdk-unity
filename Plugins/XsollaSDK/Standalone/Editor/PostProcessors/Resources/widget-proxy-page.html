@@ -23,12 +23,6 @@
         }
     } else {
 
-        window.addEventListener("beforeunload", function (e) {
-            if (window.opener)
-                window.opener.postMessage({type: 'xsolla-widget-auth-close'}, '*');
-        });
-
-
         const projectIdMatch = fullUrl.match(/[?&]project_id=([^&]+)/);
         const projectId = projectIdMatch ? projectIdMatch[1] : null;
 
@@ -45,6 +39,11 @@
                 projectId: `${projectId}`,
                 preferredLocale: locale ? locale : 'en_US',
                 callbackUrl: window.location.origin + '/xl-widget.html',
+            });
+
+            xl.on(xl.events.Close, function () {
+                if (window.opener)
+                    window.opener.postMessage({type: 'xsolla-widget-auth-close'}, '*');
             });
 
             xl.mount('xl_auth');
