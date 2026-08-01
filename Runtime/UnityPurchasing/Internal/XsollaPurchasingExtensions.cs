@@ -1,5 +1,4 @@
-﻿#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
-using JetBrains.Annotations;
+#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
 using System;
 using UnityEngine;
 using UnityEngine.Purchasing;
@@ -8,7 +7,7 @@ using Xsolla.SDK.Common;
 namespace Xsolla.SDK.UnityPurchasing
 {
     /// <summary>
-    /// <see cref="UnityEngine.Purchasing.Product"/>'s <see cref="UnityEngine.Purchasing.Product.receipt"/> in a deserialized form.
+    /// The Xsolla payload contained in a Unity IAP 5 order receipt.
     /// </summary>
     internal readonly struct PurchaseEventPayload
     {
@@ -31,27 +30,20 @@ namespace Xsolla.SDK.UnityPurchasing
         public readonly string receipt;
         public readonly OrderStatus orderStatus;
 
-        internal PurchaseEventPayload(
-            [NotNull] PurchaseEventArgsExtensions.DeserializedPayload deserializedPayload
-        )
+        internal PurchaseEventPayload(PendingOrderExtensions.DeserializedPayload payload)
         {
-            productId = deserializedPayload.productId;
-            orderId = deserializedPayload.orderId;
-            invoiceId = deserializedPayload.invoiceId;
-            transactionId = deserializedPayload.transactionId;
-            receipt = deserializedPayload.receipt;
-
-            this.orderStatus = Enum.TryParse<OrderStatus>(deserializedPayload.orderStatus, ignoreCase: true, out var orderStatus)
-                ? orderStatus
+            productId = payload.productId;
+            orderId = payload.orderId;
+            invoiceId = payload.invoiceId;
+            transactionId = payload.transactionId;
+            receipt = payload.receipt;
+            orderStatus = Enum.TryParse(payload.orderStatus, true, out OrderStatus status)
+                ? status
                 : OrderStatus.Unknown;
         }
-
-        public override string ToString() =>
-            $"Payload [productId='{productId}', orderId={orderId}, invoiceId='{invoiceId}', " +
-            $"transactionId='{transactionId}', receipt='{receipt}', orderStatus={orderStatus}]";
     }
 
-    internal static class PurchaseEventArgsExtensions
+    internal static class PendingOrderExtensions
     {
         [Serializable]
         internal sealed class DeserializedPayload
@@ -63,97 +55,52 @@ namespace Xsolla.SDK.UnityPurchasing
             public string receipt;
             public string orderStatus;
 
-            public DeserializedPayload() {}
+            public DeserializedPayload()
+            {
+            }
 
             public DeserializedPayload(
-                string productId, long orderId, string invoiceId, string transactionId,
-                string receipt, string orderStatus
-            )
+                string productId,
+                long orderId,
+                string invoiceId,
+                string transactionId,
+                string receipt,
+                string orderStatus)
             {
                 this.productId = productId;
                 this.orderId = orderId;
                 this.invoiceId = invoiceId;
                 this.transactionId = transactionId;
                 this.receipt = receipt;
-                this.orderStatus = orderStatus.ToLower();
+                this.orderStatus = orderStatus;
             }
         }
 
-        [CanBeNull]
         internal static string ExtractPayloadAsString(string receipt)
         {
+            if (string.IsNullOrEmpty(receipt))
+                return null;
+
             try
             {
-                if (string.IsNullOrEmpty(receipt))
-                    return null;
-
-                const string PAYLOAD_NEEDLE = "{\"Payload\":\"";
-                const string PAYLOAD_TAIL_NEEDLE = "}\",\"Store";
-
-                var payloadKeyIndex = receipt.IndexOf(PAYLOAD_NEEDLE, StringComparison.Ordinal);
-                if (payloadKeyIndex < 0)
-                    return null;
-
-                var payloadStartIndex = payloadKeyIndex + PAYLOAD_NEEDLE.Length;
-
-                var payloadEndIndex = receipt.LastIndexOf(PAYLOAD_TAIL_NEEDLE, StringComparison.Ordinal);
-                if (payloadEndIndex < 0)
-                    return null;
-
-                var escapedPayloadStr = receipt.Substring(
-                    payloadStartIndex, payloadEndIndex - payloadStartIndex + 1
-                );
-
-                var unescapedPayloadStr = UnescapeJsonString(escapedPayloadStr);
-
-                return unescapedPayloadStr;
+                var unifiedReceipt = JsonUtility.FromJson<UnifiedReceipt>(receipt);
+                return string.IsNullOrEmpty(unifiedReceipt?.Payload) ? null : unifiedReceipt.Payload;
             }
-            catch (Exception e)
+            catch (Exception exception)
             {
-                XsollaLogger.Debug("ExtractPayload", e.Message);
+                XsollaLogger.Debug("ExtractPayload", exception.Message);
                 return null;
-            }
-
-            static string UnescapeJsonString(string str)
-            {
-                if (string.IsNullOrEmpty(str))
-                    return str;
-
-                var sb = new System.Text.StringBuilder(str.Length);
-
-                for (var i = 0; i < str.Length; i++)
-                {
-                    var ch = str[i];
-
-                    if (ch == '\\' && i + 1 < str.Length)
-                    {
-                        var nextCh = str[i + 1];
-
-                        if (nextCh is '"' or '\\')
-                        {
-                            sb.Append(nextCh);
-                            i++;
-                            continue;
-                        }
-                    }
-
-                    sb.Append(ch);
-                }
-
-                return sb.ToString();
             }
         }
 
-        internal static PurchaseEventPayload? ExtractPayload(this PurchaseEventArgs purchaseEventArgs)
+        internal static PurchaseEventPayload? ExtractPayload(this PendingOrder pendingOrder)
         {
-            if (!purchaseEventArgs.purchasedProduct.hasReceipt) return null;
+            var payloadString = ExtractPayloadAsString(pendingOrder?.Info?.Receipt);
+            if (string.IsNullOrEmpty(payloadString))
+                return null;
 
-            var payloadStr = ExtractPayloadAsString(purchaseEventArgs.purchasedProduct.receipt);
-            if (!string.IsNullOrEmpty(payloadStr)) return null;
-
-            var payload = JsonUtility.FromJson<DeserializedPayload>(payloadStr);
-
-            return payload != null ? new PurchaseEventPayload(payload) : null;
+            var payload = JsonUtility.FromJson<DeserializedPayload>(payloadString);
+            return payload != null ? new PurchaseEventPayload(payload) : (PurchaseEventPayload?)null;
         }
     }
 }

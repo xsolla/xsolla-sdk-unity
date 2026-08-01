@@ -1,6 +1,5 @@
 #if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
 using System;
-using UnityEngine.Purchasing.Security;
 using Xsolla.SDK.Common;
 using Xsolla.SDK.Store;
 
@@ -41,7 +40,7 @@ namespace Xsolla.SDK.UnityPurchasing
             XsollaLogger.Debug(Tag, "Validate");
             
             // Attempt to extract a payload from the receipt string.
-            var payloadStr = PurchaseEventArgsExtensions.ExtractPayloadAsString(receipt);
+            var payloadStr = PendingOrderExtensions.ExtractPayloadAsString(receipt);
 
             // Fallback to raw receipt if extraction fails or returns empty.
             if (string.IsNullOrEmpty(payloadStr))

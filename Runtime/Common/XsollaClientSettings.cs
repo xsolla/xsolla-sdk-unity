@@ -186,11 +186,8 @@ namespace Xsolla.SDK.Common
         /// This is the canonical, cross-platform flag and drives both the standalone implementation
         /// and the native Android SDK.
         /// <para/>
-        /// Standalone caveat: the restore-on-launch path surfaces purchases to Unity IAP through
-        /// <c>OnProductsRetrieved</c>, which carries one purchase per SKU. Split mode therefore drains
-        /// only one unit per restore (i.e. one per app launch); set this to <c>true</c> for a
-        /// multi-unit SKU to be fully consumed in a single restore on standalone. The native Android
-        /// SDK reports per-transaction and honors split directly.
+        /// Unity IAP 5 reports restored consumables as pending orders. When purchases are collapsed,
+        /// confirming the pending order consumes the full tracked quantity in one operation.
         /// <para/>
         /// Not supported on iOS yet: iOS restores automatically via the native StoreKit observer, which
         /// does not honor this flag, so it has no effect there.

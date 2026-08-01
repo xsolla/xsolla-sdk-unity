@@ -1,434 +1,498 @@
-﻿#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
+#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
 using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using JetBrains.Annotations;
+using System.Linq;
+using UnityEngine;
 using UnityEngine.Purchasing;
 using UnityEngine.Purchasing.Extension;
-using Xsolla.SDK.Utils;
-using Xsolla.SDK.Store;
 using Xsolla.SDK.Common;
+using Xsolla.SDK.Store;
+using Xsolla.SDK.Utils;
 
 namespace Xsolla.SDK.UnityPurchasing
 {
     /// <summary>
-    /// XsollaPurchasingStore
+    /// Unity IAP 5 store implementation backed by the Xsolla Store client.
     /// </summary>
-    internal class XsollaPurchasingStore : AbstractStore, IXsollaPurchasingStoreConfiguration, IXsollaPurchasingStoreExtension
+    internal sealed class XsollaPurchasingStore : UnityEngine.Purchasing.Extension.Store
     {
         public const string Name = "XsollaStore";
-        
+
         private const string Tag = "XsollaPurchasingStore";
-        
-        [CanBeNull] private IStoreCallback _storeCallback;
+
         private readonly IXsollaStoreClient _storeClient = XsollaStoreClientFactory.Create();
-
         private readonly ISimpleFuture<XsollaClientConfiguration, string> _settingsFuture;
-        [CanBeNull] private ISimpleFuture<bool, string> _initializedFuture;
-        [CanBeNull] private ISimpleFuture<bool, string> _productsFuture;
-        
+        private readonly Dictionary<string, ProductDefinition> _definitionBySku = new Dictionary<string, ProductDefinition>();
         private readonly Dictionary<string, XsollaStoreClientProduct> _productById = new Dictionary<string, XsollaStoreClientProduct>();
-
-        // Unity IAP only hands FinishTransaction a transaction ID, but consuming a collapsed
-        // multi-unit restore needs the purchased quantity. Remember it per transaction here when the
-        // purchase is reported, then drain that many units in FinishTransaction.
-        // Not synchronized: every access (OnPurchaseSucceeded, FinishTransaction) runs on the Unity
-        // main thread, because the standalone client delivers all web-request callbacks via coroutine
-        // continuations. Same invariant as _productById above.
+        private readonly Dictionary<string, Queue<ICart>> _pendingCartsBySku = new Dictionary<string, Queue<ICart>>();
         private readonly Dictionary<string, int> _quantityByTransactionId = new Dictionary<string, int>();
+        private readonly HashSet<string> _reportedTransactionIds = new HashSet<string>();
+        private readonly List<XsollaStoreClientPurchasedProduct> _unreportedPurchases = new List<XsollaStoreClientPurchasedProduct>();
 
-        [CanBeNull] private Action<IStoreCallback, string, string, string> onPurchaseSucceeded;
-        [CanBeNull] private Action<IStoreCallback, PurchaseFailureDescription> onPurchaseFailed;
-        
-        [CanBeNull] private XsollaPurchasingStoreValidator _validator;
+        private XsollaPurchasingStoreValidator _validator;
 
-        public XsollaPurchasingStore(XsollaClientConfiguration configuration) {
+        internal ConnectionState ConnectionState { get; private set; } = ConnectionState.Disconnected;
+
+        internal XsollaPurchasingStore(XsollaClientConfiguration configuration)
+        {
             RunOnStartThread.Create();
-            
+
             _settingsFuture = SimpleFuture.Create<XsollaClientConfiguration, string>(out var promise);
             XsollaLogger.SetLogLevel(configuration.logLevel);
+
             if (configuration.delayedTask != null)
-            {
                 AwaitForConfiguration(configuration, promise);
-            }
-            else 
+            else
                 promise.Complete(configuration);
         }
-        
-        private async void AwaitForConfiguration(XsollaClientConfiguration configuration, ISimplePromise<XsollaClientConfiguration, string> promise)
-        {
-            var mapper = await configuration.delayedTask;
-            RunOnStartThread.Run(() => promise.Complete(mapper(configuration)));
-        }
-        
-        public override void Initialize(IStoreCallback callback)
-        {
-            XsollaLogger.Debug(Tag, "Initialize");
-            
-            _storeCallback = callback;
 
-            var client = _storeClient;
-            
-            _initializedFuture = SimpleFuture.Create<bool, string>(out var promise);
-            _settingsFuture.OnComplete(
-                onSuccess: configuration => {
-                    XsollaLogger.SetLogLevel(configuration.logLevel);
-                    
-                    client.Initialize(
-                        configuration, 
-                        onSuccess: () => XsollaLogger.Debug(Tag, "Initialize finished"), 
-                        onError: error => XsollaLogger.Debug(Tag, $"Initialize failed: {error}"),
-                        onSuccessPurchaseProduct: OnPurchaseSucceeded, 
-                        onErrorPurchase: error => OnPurchaseFailed(error, null)
-                    );
-                    promise.Complete(true);
-                },
-                onError: error => {
-                    XsollaLogger.Error(Tag, $"Initialize failed: {error}");
-                    promise.CompleteWithError(error);
-                }
-            );
+        private async void AwaitForConfiguration(
+            XsollaClientConfiguration configuration,
+            ISimplePromise<XsollaClientConfiguration, string> promise)
+        {
+            try
+            {
+                var mapper = await configuration.delayedTask;
+                RunOnStartThread.Run(() => promise.Complete(mapper(configuration)));
+            }
+            catch (Exception exception)
+            {
+                RunOnStartThread.Run(() => promise.CompleteWithError(exception.Message));
+            }
         }
 
-        public override void RetrieveProducts(ReadOnlyCollection<ProductDefinition> products)
+        public override void Connect()
         {
-            XsollaLogger.Debug(Tag, "RetrieveProducts");
-            
-            if (_initializedFuture == null) {
-                XsollaLogger.Error(Tag, "RetrieveProducts: not initialized");
-                _storeCallback?.OnProductsRetrieved(new List<ProductDescription>());
+            XsollaLogger.Debug(Tag, "Connect");
+
+            if (ConnectionState == ConnectionState.Connected)
+            {
+                ConnectCallback?.OnStoreConnectionSucceeded();
                 return;
             }
-            
-            ISimplePromise<bool, string> promise = null;
-            if (_productsFuture == null)
-                _productsFuture = SimpleFuture.Create<bool, string>(out promise);
 
-            _initializedFuture.OnComplete(
-                onSuccess: _ => RetrieveProducts_(),
-                onError: error => {
-                    XsollaLogger.Error(Tag, $"RetrieveProducts failed: {error}");
-                    _storeCallback?.OnProductsRetrieved(new List<ProductDescription>());
-                }
-            );
-
-            void RetrieveProducts_() {
-                var productsRestoreFuture =
-                    SimpleFuture.Create<XsollaStoreClientPurchasedProduct[], string>(out var productsRestorePromise);
-                var productsRequestFuture =
-                    SimpleFuture.Create<XsollaStoreClientProduct[], string>(out var productsRequestPromise);
-                var productsFuture = productsRestoreFuture.Zip(
-                    productsRequestFuture, (inventory, store) => (inventory, store)
-                );
-
-#if UNITY_IOS
-                // iOS restores automatically on start via the native SDK observer
-                productsRestorePromise.Complete(new XsollaStoreClientPurchasedProduct[0]);
-#else
-                if (promise != null)
+            ConnectionState = ConnectionState.Connecting;
+            _settingsFuture.OnComplete(
+                onSuccess: configuration =>
                 {
-                    _storeClient.RestorePurchases(
-                        onSuccess: items => productsRestorePromise.Complete(items),
-                        onError: error => productsRestorePromise.CompleteWithError(error)
-                    );
-                }
-                else
-                {
-                    productsRestorePromise.Complete(new XsollaStoreClientPurchasedProduct[0]);
-                }
-#endif
+                    XsollaLogger.SetLogLevel(configuration.logLevel);
+                    _storeClient.Initialize(
+                        configuration,
+                        onSuccess: () =>
+                        {
+                            ConnectionState = ConnectionState.Connected;
+                            XsollaLogger.Debug(Tag, "Connect finished");
+                            ConnectCallback?.OnStoreConnectionSucceeded();
+                        },
+                        onError: ReportConnectionFailure,
+                        onSuccessPurchaseProduct: OnPurchaseSucceeded,
+                        onErrorPurchase: error => OnPurchaseFailed(error, null));
+                },
+                onError: ReportConnectionFailure);
+        }
 
-                _storeClient.FetchProducts(products.MapToArray(product => product.storeSpecificId),
-                    onSuccess: items => productsRequestPromise.Complete(items),
-                    onError: error => productsRequestPromise.CompleteWithError(error)
-                );
+        private void ReportConnectionFailure(string error)
+        {
+            ConnectionState = ConnectionState.Disconnected;
+            XsollaLogger.Error(Tag, $"Connect failed: {error}");
+            ConnectCallback?.OnStoreConnectionFailed(new StoreConnectionFailureDescription(error, true));
+        }
 
-                productsFuture.OnComplete(
-                    onSuccess: items => {
-                        XsollaLogger.Debug(Tag, $"RetrieveProducts finished successfully. " +
-                                        $"Restored: {items.inventory.Length}, " +
-                                        $"Retrieved: {items.store.Length} ( {XsollaClientHelpers.ToJson(items.store)} )");
+        public override void FetchProducts(IReadOnlyCollection<ProductDefinition> products)
+        {
+            XsollaLogger.Debug(Tag, "FetchProducts");
 
-                        //Store url for future use
-                        foreach (var item in items.store)
-                            _productById[item.sku] = item;
-                        
-                        _storeCallback?.OnProductsRetrieved(items.store.Map(item => {
-                            var localizedPrice = (decimal) item.localizedPrice / 1_000_000;
-
-                            if (items.inventory.FindFirst(it => it.sku == item.sku, out var purchasedItem)) {
-                                // This restore path reaches Unity IAP through OnProductsRetrieved (one
-                                // ProductDescription per SKU), not OnPurchaseSucceeded, so record the
-                                // quantity here too. Without this, FinishTransaction misses the map and
-                                // consumes 1. With collapse on, purchasedItem.quantity is the full count
-                                // and the SKU drains in a single restore; in split mode it is always 1
-                                // (only the first inventory row per SKU is surfaced here).
-                                if (!string.IsNullOrEmpty(purchasedItem.transactionId))
-                                {
-                                    var trackedQuantity = purchasedItem.quantity > 0 ? purchasedItem.quantity : 1;
-                                    _quantityByTransactionId[purchasedItem.transactionId] = trackedQuantity;
-                                    XsollaLogger.Debug(Tag, $"RetrieveProducts: tracking restored sku={item.sku} quantity={trackedQuantity} transactionId={purchasedItem.transactionId} (will consume {trackedQuantity} unit(s) on FinishTransaction)");
-                                }
-
-                                var receiptData = purchasedItem.ToReceipt().ToJson();
-
-                                return new ProductDescription(
-                                    id: item.productId,
-                                    metadata: new ProductMetadata(
-                                        priceString: item.localizedPriceString,
-                                        title: item.localizedTitle,
-                                        description: item.localizedDescription,
-                                        currencyCode: item.currencyCode,
-                                        localizedPrice
-                                    ),
-                                    receipt: receiptData,
-                                    transactionId: purchasedItem.transactionId
-                                );
-                            }
-
-                            return new ProductDescription(
-                                id: item.sku,
-                                metadata: new ProductMetadata(
-                                    priceString: item.localizedPriceString,
-                                    title: item.localizedTitle,
-                                    description: item.localizedDescription,
-                                    currencyCode: item.currencyCode,
-                                    localizedPrice
-                                )
-                            );
-                        }).ToList());
-                        
-                        promise?.Complete(true);
-                    },
-                    onError: error => {
-                        XsollaLogger.Error(Tag, $"RetrieveProducts failed: {error}");
-                        _storeCallback?.OnProductsRetrieved(new List<ProductDescription>());
-                        
-                        promise?.Complete(false);
-                    }
-                );
+            if (ConnectionState != ConnectionState.Connected)
+            {
+                ProductsCallback?.OnProductsFetchFailed(new ProductFetchFailureDescription(
+                    ProductFetchFailureReason.ProviderUnavailable,
+                    "Xsolla store is not connected.",
+                    true));
+                return;
             }
-        }
 
-        public override void Purchase(ProductDefinition product, string developerPayload) =>
-            Purchase(product, developerPayload, XsollaStoreClientPurchaseArgs.Empty);
-        
-        private void Purchase(ProductDefinition product, string developerPayload, XsollaStoreClientPurchaseArgs args) =>
-            Purchase(product.storeSpecificId, developerPayload, args);
-        
-        private void Purchase(string sku, string developerPayload, XsollaStoreClientPurchaseArgs args)
-        {
-            XsollaLogger.Debug(Tag, "Purchase");
+            foreach (var definition in products)
+                _definitionBySku[definition.storeSpecificId] = definition;
 
-            _storeClient.PurchaseProduct(sku, developerPayload, args,
-                onSuccess: OnPurchaseSucceeded,
-                onError: error => OnPurchaseFailed(error, sku)
-            );
-        }
-        
-        private void OnPurchaseSucceeded(XsollaStoreClientPurchasedProduct product)
-        {
-            XsollaLogger.Debug(Tag, $"Purchase finished: {product}");
-
-            if (!string.IsNullOrEmpty(product.transactionId))
-                _quantityByTransactionId[product.transactionId] = product.quantity > 0 ? product.quantity : 1;
-
-            _productsFuture?.OnComplete(
-                onSuccess: loaded =>
+            _storeClient.FetchProducts(
+                products.Select(product => product.storeSpecificId).ToArray(),
+                onSuccess: items =>
                 {
-                    var receiptData = product.ToReceipt().ToJson();
+                    var descriptions = new List<ProductDescription>(items.Length);
+                    foreach (var item in items)
+                    {
+                        _productById[item.sku] = item;
+                        var localizedPrice = (decimal)item.localizedPrice / 1_000_000;
+                        var metadata = new ProductMetadata(
+                            item.localizedPriceString,
+                            item.localizedTitle,
+                            item.localizedDescription,
+                            item.currencyCode,
+                            localizedPrice);
 
-                    if (onPurchaseSucceeded != null)
-                        onPurchaseSucceeded(_storeCallback, product.sku, receiptData, product.transactionId);
-                    else
-                        _storeCallback?.OnPurchaseSucceeded(
-                            storeSpecificId: product.sku,
-                            receipt: receiptData,
-                            transactionIdentifier: product.transactionId
-                        );
+                        var type = _definitionBySku.TryGetValue(item.sku, out var definition)
+                            ? definition.type
+                            : ProductType.Unknown;
+                        descriptions.Add(new ProductDescription(item.sku, metadata, null, null, type));
+                    }
+
+                    XsollaLogger.Debug(Tag, $"FetchProducts finished: {descriptions.Count} product(s)");
+                    ProductsCallback?.OnProductsFetched(descriptions);
+                    FlushUnreportedPurchases();
                 },
                 onError: error =>
                 {
-                    XsollaLogger.Error(Tag, $"OnPurchaseSucceeded failed: {error}");
-                }
-            );
-        }
-        
-        private void OnPurchaseFailed(string error, [CanBeNull] string sku)
-        {
-            var parsed = XsollaStoreClientHelpers.ParsePurchaseError(error);
-            var reason = MapToIapReason(parsed.code);
-
-            if (reason == PurchaseFailureReason.UserCancelled) {
-                XsollaLogger.Warning(Tag, $"Purchase failed: {parsed.message}, reason: {reason}, sku: {sku}");
-            } else {
-                XsollaLogger.Error(Tag, $"Purchase failed: {parsed.message}, reason: {reason}, sku: {sku}");
-            }
-
-            if (sku == null) return;
-
-            var desc = new PurchaseFailureDescription(
-                productId: sku,
-                reason: reason,
-                message: parsed.message
-            );
-                    
-            if (onPurchaseFailed != null)
-                onPurchaseFailed(_storeCallback, desc);
-            else 
-                _storeCallback?.OnPurchaseFailed(desc);
+                    XsollaLogger.Error(Tag, $"FetchProducts failed: {error}");
+                    ProductsCallback?.OnProductsFetchFailed(new ProductFetchFailureDescription(
+                        ProductFetchFailureReason.Unknown,
+                        error,
+                        true));
+                });
         }
 
-        private PurchaseFailureReason MapToIapReason(XsollaStoreClientPurchaseErrorCode code)
+        public override void FetchPurchases()
         {
-            switch (code)
+            FetchPurchasesInternal(null);
+        }
+
+        internal void RestoreTransactions(Action<bool, string> callback)
+        {
+            FetchPurchasesInternal(callback);
+        }
+
+        private void FetchPurchasesInternal(Action<bool, string> completionHandler)
+        {
+            XsollaLogger.Debug(Tag, "FetchPurchases");
+
+            if (ConnectionState != ConnectionState.Connected)
             {
-                case XsollaStoreClientPurchaseErrorCode.Cancelled:
-                    return PurchaseFailureReason.UserCancelled;
-                default:
-                    return PurchaseFailureReason.PaymentDeclined;
-            }
-        }
-
-        public override void FinishTransaction(ProductDefinition product, string transactionId)
-        {
-            var sku = product.storeSpecificId;
-
-            if (product.type != ProductType.Consumable)
-            {
-                XsollaLogger.Debug(Tag, $"FinishTransaction: sku={sku} transactionId={transactionId} type={product.type} — not consumable, nothing to consume.");
-
-                // Non-consumables are never consumed, so drop any tracked quantity here to avoid leaking the entry.
-                if (!string.IsNullOrEmpty(transactionId))
-                    _quantityByTransactionId.Remove(transactionId);
-
+                const string error = "Xsolla store is not connected.";
+                PurchaseFetchCallback?.OnPurchasesRetrievalFailed(new PurchasesFetchFailureDescription(
+                    PurchasesFetchFailureReason.StoreNotConnected,
+                    error));
+                completionHandler?.Invoke(false, error);
                 return;
             }
 
-            int quantity;
-            string quantitySource;
-            if (!string.IsNullOrEmpty(transactionId) && _quantityByTransactionId.TryGetValue(transactionId, out var tracked))
-            {
-                quantity = tracked;
-                quantitySource = quantity > 1 ? "collapsed multi-unit" : "tracked single unit";
-            }
-            else
-            {
-                quantity = 1;
-                quantitySource = "untracked, defaulting to 1";
-            }
-
-            XsollaLogger.Debug(Tag, $"FinishTransaction: consuming sku={sku} quantity={quantity} ({quantitySource}) transactionId={transactionId}");
-
-            _storeClient.ConsumeProduct(sku, quantity, transactionId,
-                onSuccess: () =>
-                {
-                    // Drop the entry only after a confirmed consume so a failed or repeated
-                    // FinishTransaction still drains the full multi-unit quantity instead of defaulting to 1.
-                    if (!string.IsNullOrEmpty(transactionId))
-                        _quantityByTransactionId.Remove(transactionId);
-
-                    XsollaLogger.Debug(Tag, $"FinishTransaction finished: sku={sku} consumed {quantity} unit(s) in a single consume.");
-                },
-                onError: error => XsollaLogger.Error(Tag, $"FinishTransaction failed: sku={sku} quantity={quantity} transactionId={transactionId}: {error}")
-            );
-        }
-
-        public void RestoreTransactions(Action<bool> onSuccess, Action<string> onError)
-        {
-            XsollaLogger.Debug(Tag, "RestoreTransactions");
-            
             _storeClient.RestorePurchases(
                 onSuccess: items =>
                 {
-                    foreach (var item in items)
-                    {
-                        //if (item.VirtualItemType != VirtualItemType.Consumable)
-                        //    continue;
-                        
-                        OnPurchaseSucceeded(item);
-                    }
-                    
-                    onSuccess?.Invoke(items.Length > 0);
+                    var orders = BuildRestoredOrders(items);
+                    XsollaLogger.Debug(Tag, $"FetchPurchases finished: {orders.Count} order(s)");
+                    PurchaseFetchCallback?.OnAllPurchasesRetrieved(orders);
+                    completionHandler?.Invoke(true, null);
                 },
-                onError: error => onError?.Invoke(error.ToString())
-            );
+                onError: error =>
+                {
+                    XsollaLogger.Error(Tag, $"FetchPurchases failed: {error}");
+                    PurchaseFetchCallback?.OnPurchasesRetrievalFailed(new PurchasesFetchFailureDescription(
+                        PurchasesFetchFailureReason.Unknown,
+                        error));
+                    completionHandler?.Invoke(false, error);
+                });
         }
 
-        public bool TryGetProductIconUrl(Product product, out string url)
+        private List<Order> BuildRestoredOrders(IEnumerable<XsollaStoreClientPurchasedProduct> purchases)
         {
-            var res = _productById.TryGetValue(product.definition.storeSpecificId, out var productData);
-            if (res)
+            var orders = new List<Order>();
+            foreach (var purchase in purchases)
+            {
+                var product = FindProduct(purchase.sku);
+                if (product == null)
+                {
+                    XsollaLogger.Warning(Tag, $"Ignoring restored purchase for unknown product '{purchase.sku}'. Fetch products before fetching purchases.");
+                    continue;
+                }
+
+                TrackQuantity(purchase);
+                TrackReportedTransaction(purchase.transactionId);
+                var cart = new Cart(product);
+                var info = new XsollaOrderInfo(purchase.ToReceipt().ToJson(), purchase.transactionId);
+
+                if (product.definition.type == ProductType.Consumable)
+                    orders.Add(new PendingOrder(cart, info));
+                else
+                    orders.Add(new ConfirmedOrder(cart, info));
+            }
+
+            return orders;
+        }
+
+        public override void Purchase(ICart cart)
+        {
+            var items = cart?.Items();
+            if (items == null || items.Count != 1)
+            {
+                if (cart != null)
+                {
+                    PurchaseCallback?.OnPurchaseFailed(new FailedOrder(
+                        cart,
+                        PurchaseFailureReason.ProductUnavailable,
+                        "Xsolla purchases must contain exactly one product."));
+                }
+                return;
+            }
+
+            Purchase(items[0].Product, cart, null, XsollaStoreClientPurchaseArgs.Empty);
+        }
+
+        internal void InitiatePurchase(Product product, XsollaStoreClientPurchaseArgs args)
+        {
+            if (product == null)
+                return;
+
+            var cart = new Cart(product);
+            Purchase(product, cart, null, args ?? XsollaStoreClientPurchaseArgs.Empty);
+        }
+
+        internal void InitiatePurchase(string productId, XsollaStoreClientPurchaseArgs args)
+        {
+            var product = FindProduct(productId);
+            if (product == null)
+            {
+                XsollaLogger.Error(Tag, $"InitiatePurchase failed: product '{productId}' has not been fetched.");
+                return;
+            }
+
+            InitiatePurchase(product, args);
+        }
+
+        private void Purchase(Product product, ICart cart, string developerPayload, XsollaStoreClientPurchaseArgs args)
+        {
+            var sku = product.definition.storeSpecificId;
+            EnqueueCart(sku, cart);
+            XsollaLogger.Debug(Tag, $"Purchase: {sku}");
+
+            _storeClient.PurchaseProduct(
+                sku,
+                developerPayload,
+                args,
+                onSuccess: OnPurchaseSucceeded,
+                onError: error => OnPurchaseFailed(error, sku));
+        }
+
+        private void OnPurchaseSucceeded(XsollaStoreClientPurchasedProduct purchase)
+        {
+            XsollaLogger.Debug(Tag, $"Purchase finished: {purchase}");
+            if (!TryReportPurchase(purchase))
+                _unreportedPurchases.Add(purchase);
+        }
+
+        private bool TryReportPurchase(XsollaStoreClientPurchasedProduct purchase)
+        {
+            if (!string.IsNullOrEmpty(purchase.transactionId) && _reportedTransactionIds.Contains(purchase.transactionId))
+                return true;
+
+            if (PurchaseCallback == null || !TryGetCart(purchase.sku, true, out var cart))
+                return false;
+
+            TrackQuantity(purchase);
+            var order = new PendingOrder(
+                cart,
+                new XsollaOrderInfo(purchase.ToReceipt().ToJson(), purchase.transactionId));
+            PurchaseCallback.OnPurchaseSucceeded(order);
+            TrackReportedTransaction(purchase.transactionId);
+            return true;
+        }
+
+        private void FlushUnreportedPurchases()
+        {
+            for (var index = _unreportedPurchases.Count - 1; index >= 0; index--)
+            {
+                if (!TryReportPurchase(_unreportedPurchases[index]))
+                    continue;
+
+                _unreportedPurchases.RemoveAt(index);
+            }
+        }
+
+        private void OnPurchaseFailed(string error, string sku)
+        {
+            var parsed = XsollaStoreClientHelpers.ParsePurchaseError(error);
+            var reason = MapToIapReason(parsed.code);
+            if (reason == PurchaseFailureReason.UserCancelled)
+                XsollaLogger.Warning(Tag, $"Purchase failed: {parsed.message}, reason: {reason}, sku: {sku}");
+            else
+                XsollaLogger.Error(Tag, $"Purchase failed: {parsed.message}, reason: {reason}, sku: {sku}");
+
+            if (string.IsNullOrEmpty(sku) || PurchaseCallback == null || !TryGetCart(sku, true, out var cart))
+                return;
+
+            PurchaseCallback.OnPurchaseFailed(new FailedOrder(cart, reason, parsed.message));
+        }
+
+        private static PurchaseFailureReason MapToIapReason(XsollaStoreClientPurchaseErrorCode code)
+        {
+            return code == XsollaStoreClientPurchaseErrorCode.Cancelled
+                ? PurchaseFailureReason.UserCancelled
+                : PurchaseFailureReason.PaymentDeclined;
+        }
+
+        public override void FinishTransaction(PendingOrder pendingOrder)
+        {
+            var item = pendingOrder?.CartOrdered?.Items().FirstOrDefault();
+            if (item == null)
+            {
+                if (pendingOrder != null)
+                    ConfirmCallback?.OnConfirmOrderFailed(new FailedOrder(pendingOrder, PurchaseFailureReason.Unknown, "Pending order has no product."));
+                return;
+            }
+
+            var product = item.Product;
+            var sku = product.definition.storeSpecificId;
+            var transactionId = pendingOrder.Info.TransactionID;
+
+            if (product.definition.type != ProductType.Consumable)
+            {
+                _quantityByTransactionId.Remove(transactionId);
+                ConfirmCallback?.OnConfirmOrderSucceeded(transactionId);
+                return;
+            }
+
+            var quantity = _quantityByTransactionId.TryGetValue(transactionId, out var trackedQuantity)
+                ? trackedQuantity
+                : 1;
+
+            XsollaLogger.Debug(Tag, $"FinishTransaction: consuming sku={sku} quantity={quantity} transactionId={transactionId}");
+            _storeClient.ConsumeProduct(
+                sku,
+                quantity,
+                transactionId,
+                onSuccess: () =>
+                {
+                    _quantityByTransactionId.Remove(transactionId);
+                    XsollaLogger.Debug(Tag, $"FinishTransaction finished: sku={sku} quantity={quantity}");
+                    ConfirmCallback?.OnConfirmOrderSucceeded(transactionId);
+                },
+                onError: error =>
+                {
+                    XsollaLogger.Error(Tag, $"FinishTransaction failed: sku={sku} quantity={quantity} transactionId={transactionId}: {error}");
+                    ConfirmCallback?.OnConfirmOrderFailed(new FailedOrder(pendingOrder, PurchaseFailureReason.Unknown, error));
+                });
+        }
+
+        public override void CheckEntitlement(ProductDefinition product)
+        {
+            if (product == null)
+                return;
+
+            _storeClient.RestorePurchases(
+                onSuccess: purchases =>
+                {
+                    var entitled = purchases.Any(item => item.sku == product.storeSpecificId);
+                    var status = !entitled
+                        ? EntitlementStatus.NotEntitled
+                        : product.type == ProductType.Consumable
+                            ? EntitlementStatus.EntitledUntilConsumed
+                            : EntitlementStatus.FullyEntitled;
+                    EntitlementCallback?.OnCheckEntitlement(product, status);
+                },
+                onError: error => EntitlementCallback?.OnCheckEntitlement(product, EntitlementStatus.Unknown, error));
+        }
+
+        private void TrackQuantity(XsollaStoreClientPurchasedProduct purchase)
+        {
+            if (!string.IsNullOrEmpty(purchase.transactionId))
+                _quantityByTransactionId[purchase.transactionId] = purchase.quantity > 0 ? purchase.quantity : 1;
+        }
+
+        private void TrackReportedTransaction(string transactionId)
+        {
+            if (!string.IsNullOrEmpty(transactionId))
+                _reportedTransactionIds.Add(transactionId);
+        }
+
+        private void EnqueueCart(string sku, ICart cart)
+        {
+            if (!_pendingCartsBySku.TryGetValue(sku, out var carts))
+            {
+                carts = new Queue<ICart>();
+                _pendingCartsBySku[sku] = carts;
+            }
+
+            carts.Enqueue(cart);
+        }
+
+        private bool TryGetCart(string sku, bool consumeQueuedCart, out ICart cart)
+        {
+            if (_pendingCartsBySku.TryGetValue(sku, out var carts) && carts.Count > 0)
+            {
+                cart = consumeQueuedCart ? carts.Dequeue() : carts.Peek();
+                if (carts.Count == 0)
+                    _pendingCartsBySku.Remove(sku);
+                return true;
+            }
+
+            var product = FindProduct(sku);
+            if (product != null)
+            {
+                cart = new Cart(product);
+                return true;
+            }
+
+            cart = null;
+            return false;
+        }
+
+        private static Product FindProduct(string productId)
+        {
+            try
+            {
+                return UnityIAPServices.Product(Name).GetProductById(productId);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        internal bool TryGetProductIconUrl(Product product, out string url)
+        {
+            if (product != null && _productById.TryGetValue(product.definition.storeSpecificId, out var productData))
             {
                 url = productData.iconUrl;
                 return true;
             }
-            
+
             url = null;
             return false;
         }
 
-        public bool TryGetProduct(Product product, out XsollaStoreClientProduct productData)
+        internal bool TryGetProduct(Product product, out XsollaStoreClientProduct productData)
         {
-            return _productById.TryGetValue(product.definition.storeSpecificId, out productData);
+            if (product != null)
+                return _productById.TryGetValue(product.definition.storeSpecificId, out productData);
+
+            productData = null;
+            return false;
         }
 
-        public void SetCustomPurchaseFlowCallbacks(
-            [CanBeNull] Action<IStoreCallback, string, string, string> onPurchaseSucceeded,
-            [CanBeNull] Action<IStoreCallback, PurchaseFailureDescription> onPurchaseFailed
-        ) {
-            this.onPurchaseSucceeded = onPurchaseSucceeded;
-            this.onPurchaseFailed = onPurchaseFailed;
+        internal XsollaPurchasingStoreValidator GetValidator()
+        {
+            return _validator ?? (_validator = new XsollaPurchasingStoreValidator(_storeClient));
         }
 
-        public XsollaPurchasingStoreValidator GetValidator()
+        internal void GetAccessToken(Action<string> onSuccess, Action<string> onError)
         {
-            if (_validator == null)
-                _validator = new XsollaPurchasingStoreValidator(_storeClient);
-            return _validator;
-        }
-
-        public void GetAccessToken(Action<string> onSuccess, Action<string> onError)
-        {
-            XsollaLogger.Debug(Tag, "GetAccessToken");
-            
             _storeClient.GetAccessToken(
-                onSuccess: token => onSuccess?.Invoke(token),
-                onError: error => onError?.Invoke(error)
-            );
+                token => onSuccess?.Invoke(token),
+                error => onError?.Invoke(error));
         }
 
-        public void UpdateAccessToken(string token, Action onSuccess, Action<string> onError)
+        internal void UpdateAccessToken(string token, Action onSuccess, Action<string> onError)
         {
-            XsollaLogger.Debug(Tag, "UpdateAccessToken");
-            
             _storeClient.UpdateAccessToken(
                 token,
-                onSuccess: () => onSuccess?.Invoke(),
-                onError: error => onError?.Invoke(error)
-            );
+                () => onSuccess?.Invoke(),
+                error => onError?.Invoke(error));
         }
 
-        public void GetAppleStorefront(Action<string> onSuccess, Action<string> onError)
+        internal void GetAppleStorefront(Action<string> onSuccess, Action<string> onError)
         {
-            XsollaLogger.Debug(Tag, "GetAppleStorefront");
-            
             _storeClient.GetAppleStorefront(
-                onSuccess: storefront => onSuccess?.Invoke(storefront),
-                onError: error => onError?.Invoke(error)
-            );
+                storefront => onSuccess?.Invoke(storefront),
+                error => onError?.Invoke(error));
         }
-
-        public void InitiatePurchase(Product product, XsollaStoreClientPurchaseArgs args)
-        {
-            Purchase(product.definition.storeSpecificId, null, args);
-        }
-
-        public void InitiatePurchase(string productId, XsollaStoreClientPurchaseArgs args)
-        {
-            Purchase(productId, null, args);
-        }
-
     }
 }
 #endif

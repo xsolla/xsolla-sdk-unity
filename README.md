@@ -24,7 +24,7 @@ See exactly how payments work before writing a single line of code. The SDK Expl
 
 ## Overview
 
-Xsolla Mobile SDK provides a Unity IAP-compatible purchasing module for in-game purchases via Xsolla Pay Station. It integrates with Unity's standard `IStoreListener` pattern so the purchase flow feels familiar to Unity developers.
+Xsolla Mobile SDK provides a Unity IAP 5 custom store for in-game purchases via Xsolla Pay Station. It uses the service-based `StoreController`, product, and order APIs introduced in Unity IAP 5.
 
 **Key features:**
 
@@ -39,7 +39,7 @@ Xsolla Mobile SDK provides a Unity IAP-compatible purchasing module for in-game 
 ## Requirements
 
 - Unity 2022.3 LTS or later
-- Unity IAP (`com.unity.purchasing`) 4.13.0+ (5.x is not supported)
+- Unity IAP (`com.unity.purchasing`) 5.0.2+
 
 ## Installation
 
@@ -57,13 +57,14 @@ Add the package via Unity Package Manager using the Git URL:
 
 ### 1. Connect
 
-Configure the SDK with your project credentials, set up a purchase listener (see step 4), and initialize Unity Purchasing:
+Configure the SDK, register Xsolla, subscribe to Unity IAP 5 events, and connect to the store:
 
 ```csharp
 using UnityEngine;
 using UnityEngine.Purchasing;
 using Xsolla.SDK.Common;
 using Xsolla.SDK.UnityPurchasing;
+using System.Collections.Generic;
 
 var settings = XsollaClientSettings.Builder.Create()
     .SetProjectId(77640)
@@ -79,66 +80,88 @@ var module = XsollaPurchasingModule.Builder.Create()
     .SetConfiguration(configuration)
     .Build();
 
-var builder = ConfigurationBuilder.Instance(module);
-builder.AddProduct("com.xsolla.crystals.10", ProductType.Consumable);
-// ...more products
+StoreController storeController = module.CreateStoreController();
+IXsollaPurchasingStoreExtension xsolla = module.GetStoreExtension();
 
-UnityPurchasing.Initialize(this, builder); // `this` implements IStoreListener
+storeController.OnProductsFetched += OnProductsFetched;
+storeController.OnProductsFetchFailed += OnProductsFetchFailed;
+storeController.OnPurchasePending += OnPurchasePending;
+storeController.OnPurchaseFailed += OnPurchaseFailed;
+storeController.OnPurchaseConfirmed += OnPurchaseConfirmed;
+storeController.OnPurchasesFetched += OnPurchasesFetched;
+
+await storeController.Connect();
+
+storeController.FetchProducts(new List<ProductDefinition>
+{
+    new ProductDefinition("com.xsolla.crystals.10", ProductType.Consumable)
+});
 ```
 
-### 2. Handle Initialization
+### 2. Handle Products
 
-Store the controller and Xsolla extensions when Unity Purchasing is ready:
+Unity IAP 5 returns fetched products through `OnProductsFetched`. Fetch existing purchases after products are available so restored orders can be matched to their product definitions:
 
 ```csharp
-private IStoreController _storeController;
-private IXsollaPurchasingStoreExtension _xsollaExtensions;
-
-public void OnInitialized(IStoreController controller, IExtensionProvider extensions)
+private void OnProductsFetched(List<Product> products)
 {
-    _storeController = controller;
-    _xsollaExtensions = extensions.GetExtension<IXsollaPurchasingStoreExtension>();
-
-    // Products are now available via controller.products.all
+    storeController.FetchPurchases();
 }
 
-public void OnInitializeFailed(InitializationFailureReason error, string message)
+private void OnProductsFetchFailed(ProductFetchFailed failure)
 {
-    // Handle error
+    Debug.LogError(failure.FailureReason);
+}
+
+private void OnPurchasesFetched(Orders orders)
+{
+    // Unity IAP 5 exposes restored consumables here as pending orders.
+    foreach (PendingOrder order in orders.PendingOrders)
+        ProcessPendingOrder(order);
+
+    // Restore entitlements represented by orders.ConfirmedOrders here too.
 }
 ```
 
 ### 3. Purchase
 
-Initiate a purchase using the store controller:
+Initiate a purchase using the Unity IAP 5 controller:
 
 ```csharp
-Product product = _storeController.products.WithID("com.xsolla.crystals.10");
-_storeController.InitiatePurchase(product);
+Product product = storeController.GetProductById("com.xsolla.crystals.10");
+storeController.PurchaseProduct(product);
 ```
 
 ### 4. Finalize
 
-Handle completed transactions in `ProcessPurchase`, validate the receipt, and confirm:
+Handle the pending order, validate its receipt, award the product, and confirm it. Confirming a consumable calls the Xsolla consume operation; the order is confirmed only after that operation succeeds:
 
 ```csharp
-public PurchaseProcessingResult ProcessPurchase(PurchaseEventArgs args)
+private void OnPurchasePending(PendingOrder order)
 {
-    _xsollaExtensions.GetValidator().Validate(args.purchasedProduct.receipt, (success, error) =>
+    ProcessPendingOrder(order);
+}
+
+private void ProcessPendingOrder(PendingOrder order)
+{
+    xsolla.GetValidator().Validate(order.Info.Receipt, (success, error) =>
     {
         if (success)
         {
             // Award the product to the user
-            _storeController.ConfirmPendingPurchase(args.purchasedProduct);
+            storeController.ConfirmPurchase(order);
         }
     });
-
-    return PurchaseProcessingResult.Pending;
 }
 
-public void OnPurchaseFailed(Product product, PurchaseFailureReason reason)
+private void OnPurchaseFailed(FailedOrder order)
 {
-    // Handle error
+    Debug.LogError($"Purchase failed: {order.FailureReason}: {order.Details}");
+}
+
+private void OnPurchaseConfirmed(Order order)
+{
+    // Confirmation completed, or inspect FailedOrder if confirmation failed.
 }
 ```
 

@@ -1,76 +1,77 @@
-﻿#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
-using JetBrains.Annotations;
-using UnityEngine.Purchasing.Extension;
+#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
+using UnityEngine.Purchasing;
 using Xsolla.SDK.Common;
 
 namespace Xsolla.SDK.UnityPurchasing
 {
     /// <summary>
-    /// Provides a Unity Purchasing module for Xsolla integration.
+    /// Registers Xsolla as a Unity IAP 5 custom store.
     /// </summary>
-    public class XsollaPurchasingModule : AbstractPurchasingModule
+    public sealed class XsollaPurchasingModule
     {
-        /// <summary>
-        /// Gets the store name for Xsolla Purchasing.
-        /// </summary>
         public static string StoreName => XsollaPurchasingStore.Name;
 
-        /// <summary>
-        /// Builder for <see cref="XsollaPurchasingModule"/>.
-        /// </summary>
-        public class Builder
+        public sealed class Builder
         {
             private XsollaClientConfiguration _configuration = XsollaClientConfiguration.Builder.Empty();
 
-            /// <summary>
-            /// Creates a new builder instance.
-            /// </summary>
             public static Builder Create() => new Builder();
 
-            /// <summary>
-            /// Sets the client configuration.
-            /// </summary>
-            /// <param name="configuration">Client configuration.</param>
-            public Builder SetConfiguration(XsollaClientConfiguration configuration) { _configuration = configuration; return this; }
+            public Builder SetConfiguration(XsollaClientConfiguration configuration)
+            {
+                _configuration = configuration;
+                return this;
+            }
 
-            /// <summary>
-            /// Builds the <see cref="XsollaPurchasingModule"/> instance.
-            /// </summary>
             public XsollaPurchasingModule Build() => new XsollaPurchasingModule(_configuration);
         }
 
-        /// <summary>
-        /// The client configuration for the purchasing module.
-        /// </summary>
-        [CanBeNull] private readonly XsollaClientConfiguration _configuration;
+        private readonly XsollaClientConfiguration _configuration;
+        private bool _configured;
 
-        /// <summary>
-        /// Initializes a new instance of <see cref="XsollaPurchasingModule"/>.
-        /// </summary>
-        /// <param name="configuration">Client configuration.</param>
         private XsollaPurchasingModule(XsollaClientConfiguration configuration)
         {
             _configuration = configuration;
         }
 
-        #region AbstractPurchasingModule
-
         /// <summary>
-        /// Configures the purchasing module and registers the Xsolla store.
+        /// Registers Xsolla and selects it as the default Unity IAP store.
+        /// Call this before requesting Unity IAP services.
         /// </summary>
-        public override void Configure()
+        public void Configure()
         {
-            XsollaLogger.SetLogLevel(_configuration.logLevel);
+            if (_configured)
+                return;
 
+            XsollaLogger.SetLogLevel(_configuration.logLevel);
             var store = new XsollaPurchasingStore(_configuration);
 
-            BindExtension<IXsollaPurchasingStoreExtension>(store);
-            BindConfiguration<IXsollaPurchasingStoreConfiguration>(store);
+            UnityIAPServices.AddNewCustomStore(new XsollaPurchasingStoreWrapper(store));
+            UnityIAPServices.AddNewExtendedPurchaseService(
+                StoreName,
+                baseService => new XsollaPurchasingService(baseService, store));
+            UnityIAPServices.SetStoreAsDefault(StoreName);
 
-            RegisterStore(StoreName, store);
+            _configured = true;
         }
 
-        #endregion
+        /// <summary>
+        /// Configures Xsolla and returns a Unity IAP 5 controller for it.
+        /// </summary>
+        public StoreController CreateStoreController()
+        {
+            Configure();
+            return UnityIAPServices.StoreController(StoreName);
+        }
+
+        /// <summary>
+        /// Gets Xsolla-specific purchasing operations from the Unity IAP 5 purchase service.
+        /// </summary>
+        public IXsollaPurchasingStoreExtension GetStoreExtension()
+        {
+            Configure();
+            return (IXsollaPurchasingStoreExtension)UnityIAPServices.Purchase(StoreName);
+        }
     }
 }
 #endif

@@ -1,4 +1,9 @@
-## [3.1.17] - 2026-06-30
+## [3.1.18] - 2026-08-1
+
+### Changed
+
+- Migrated the Unity Purchasing integration from the legacy Unity IAP 4 listener/module APIs to the Unity IAP 5 service, custom-store, and order APIs
+- Updated the `com.unity.purchasing` dependency to `5.0.2`
 
 ### Fixed
 
