@@ -332,8 +332,9 @@ namespace Xsolla.SDK.Store
                     args.externalId, args.paymentToken,
                     args.paymentMethodId,
 #pragma warning disable CS0618 // Type or member is obsolete
-                    args.allowTokenOnlyFinishedStatusWithoutOrderId
+                    args.allowTokenOnlyFinishedStatusWithoutOrderId,
 #pragma warning restore CS0618 // Type or member is obsolete
+                    args.externalTransactionToken
                 )
             );
         }

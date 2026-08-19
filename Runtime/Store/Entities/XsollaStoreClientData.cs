@@ -626,6 +626,9 @@ namespace Xsolla.SDK.Store
         /// <summary>Payment method ID (optional).</summary>
         public int? paymentMethodId;
 
+        /// <summary>External transaction token (optional).</summary>
+        [CanBeNull] public string externalTransactionToken;
+
         /// <summary>
         /// Initializes a new instance of <see cref="XsollaStoreClientPaymentData"/>.
         /// </summary>
@@ -634,10 +637,12 @@ namespace Xsolla.SDK.Store
         /// <param name="externalId">External ID.</param>
         /// <param name="paymentToken">Payment token (optional).</param>
         /// <param name="paymentMethodId">Payment method ID (optional).</param>
+        /// <param name="externalTransactionToken">External transaction token (optional).</param>
         public XsollaStoreClientPaymentData(
             string sku, string developerPayload, string externalId,
-            [CanBeNull] string paymentToken = null, int? paymentMethodId = null, 
-            bool allowTokenOnlyFinishedStatusWithoutOrderId = false
+            [CanBeNull] string paymentToken = null, int? paymentMethodId = null,
+            bool allowTokenOnlyFinishedStatusWithoutOrderId = false,
+            [CanBeNull] string externalTransactionToken = null
         )
         {
             this.sku = sku;
@@ -646,6 +651,7 @@ namespace Xsolla.SDK.Store
             this.paymentToken = paymentToken;
             this.paymentMethodId = paymentMethodId;
             this.allowTokenOnlyFinishedStatusWithoutOrderId = allowTokenOnlyFinishedStatusWithoutOrderId;
+            this.externalTransactionToken = externalTransactionToken;
         }
     }
 
@@ -768,6 +774,14 @@ namespace Xsolla.SDK.Store
         public int? paymentMethodId = null;
 
         /// <summary>
+        /// External transaction token (optional). Binds the order to a transaction created outside
+        /// of the SDK.
+        /// <para/><b>Only supported on Android.</b> Supplying it on Windows, Mac, Linux, WebGL, or
+        /// iOS fails the purchase with an error instead of being silently dropped.
+        /// </summary>
+        [CanBeNull] public string externalTransactionToken = null;
+
+        /// <summary>
         /// Gets an empty purchase arguments instance.
         /// </summary>
         public static XsollaStoreClientPurchaseArgs Empty => Builder.Create().Build();
@@ -785,7 +799,8 @@ namespace Xsolla.SDK.Store
             public Builder SetPaymentToken(string paymentToken)  { _args.paymentToken = paymentToken; return this; }
             public Builder SetDeveloperPayload([CanBeNull] string developerPayload)  { _args.developerPayload = developerPayload; return this; }
             public Builder SetPaymentMethodId(int? paymentMethodId)  { _args.paymentMethodId = paymentMethodId; return this; }
-            
+            public Builder SetExternalTransactionToken([CanBeNull] string externalTransactionToken)  { _args.externalTransactionToken = externalTransactionToken; return this; }
+
             [Obsolete("Deprecated since v3.1.1. Will be removed in a future major version.")]
             public Builder SetAllowTokenOnlyFinishedStatusWithoutOrderId(bool allowTokenOnlyFinishedStatusWithoutOrderId)  { _args.allowTokenOnlyFinishedStatusWithoutOrderId = allowTokenOnlyFinishedStatusWithoutOrderId; return this; }
 

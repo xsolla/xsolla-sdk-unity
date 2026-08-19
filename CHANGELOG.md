@@ -1,3 +1,21 @@
+## [3.1.18] - 2026-08-19
+
+### Added
+
+- Added `XsollaStoreClientPurchaseArgs.Builder.SetExternalTransactionToken(string)` for passing external transaction token on supported platforms
+
+- Android: Added support for `XsollaStoreClientPurchaseArgs.Builder.SetExternalTransactionToken(string)` setter
+
+### Changed
+
+- Android: updated SDK to `3.0.52`
+
+- iOS: updated SDK to `3.10.0`
+
+### Fixed
+
+- Win/Mac: `CXsollaStoreClientPurchaseArgs::SetExternalId` is now forwarded to the managed layer
+
 ## [3.1.17] - 2026-06-30
 
 ### Fixed

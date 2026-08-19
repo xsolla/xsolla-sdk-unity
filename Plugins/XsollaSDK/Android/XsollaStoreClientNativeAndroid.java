@@ -288,6 +288,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             Log.e(TAG, msg);
     }
 
+    private void reportPurchaseError(@NonNull final BillingResult billingResult) {
+        logError(billingResult.toString());
+
+        mainThreadHandler.post(() -> {
+            if (m_purchaseCallback != null) {
+                m_purchaseCallback.onError(JsonHelper.billingResultToJson(billingResult));
+            }
+        });
+    }
+
     public void Initialize(
         @NonNull final String argsJson,
         @Nullable final String additionalSettingsJson,
@@ -745,6 +755,22 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         final Optional<Boolean> maybeAllowTokenOnlyFinishedStatusWithoutOrderId = json.flatMap(__ ->
             JsonHelper.jsonToBoolean(__, "allowTokenOnlyFinishedStatusWithoutOrderId")
         );
+        final Optional<String> maybeExternalTransactionToken = json.flatMap(__ ->
+            JsonHelper.jsonToString(__, "externalTransactionToken").filter(s -> !TextUtils.isEmpty(s))
+        );
+
+        // Only the product based flow below builds `BillingFlowParams`, the one place the token can
+        // be attached. Reporting the mismatch beats creating an order that silently drops it.
+        if (maybeExternalTransactionToken.isPresent() && (
+            simpleMode != SimpleMode.Off || maybePaymentToken.isPresent()
+        )) {
+            reportPurchaseError(Error.of(
+                "An external transaction token is only supported by the product based billing"
+                    + " flow, which is unavailable while a payment token is used or 'SimpleMode'"
+                    + " is not 'Off'"
+            ).toBillingResult());
+            return;
+        }
 
         if (simpleMode == SimpleMode.ServerTokens || maybePaymentToken.isPresent()) {
             BillingResult billingResult;
@@ -777,15 +803,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             }
 
             if (!billingResult.isSuccessful()) {
-                logError(billingResult.toString());
-
-                final BillingResult finalBillingResult = billingResult;
-
-                mainThreadHandler.post(() -> {
-                    if (m_purchaseCallback != null) {
-                        m_purchaseCallback.onError(JsonHelper.billingResultToJson(finalBillingResult));
-                    }
-                });
+                reportPurchaseError(billingResult);
             }
         } else if (simpleMode == SimpleMode.WebShop) {
             final CompletableFuture<Either<Error, Void>> future = new CompletableFuture<>();
@@ -837,13 +855,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
             billingClient.queryProductDetailsAsync(params, (result, productDetailsList) -> {
                 if (result.getResponseCode() != BillingClient.BillingResponseCode.OK || productDetailsList == null) {
-                    logError(result.toString());
-
-                    mainThreadHandler.post(() -> {
-                        if (m_purchaseCallback != null) {
-                            m_purchaseCallback.onError(JsonHelper.billingResultToJson(result));
-                        }
-                    });
+                    reportPurchaseError(result);
                 } else {
                     final BillingFlowCanceller purchaseCanceller = new BillingFlowCanceller();
 
@@ -858,6 +870,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                         ))
                         .setDeveloperPayload(maybeDeveloperPayload.orElse(null))
                         .setExternalTransactionId(maybeExternalTransactionId.orElse(null))
+                        .setExternalTransactionToken(maybeExternalTransactionToken.orElse(null))
                         .setForcePaymentMethodId(maybePaymentMethodId.orElse(null))
                         .setTrackingId(trackingId)
                         .setCanceller(purchaseCanceller)

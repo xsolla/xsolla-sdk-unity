@@ -215,6 +215,15 @@ namespace Xsolla.SDK.Store
         {
 	        var finalDeveloperPayload = developerPayload ?? args.developerPayload;
 
+            // TODO: forward `args.externalTransactionToken` to the native bridge. Both
+            // `_XsollaUnityBridgePurchase` and its Objective-C counterpart need the extra argument
+            // before the token can be applied here; until then it is reported as unsupported.
+            if (!string.IsNullOrEmpty(args.externalTransactionToken))
+            {
+                onError?.Invoke("External transaction token is not supported on iOS yet");
+                return;
+            }
+
             _XsollaUnityBridgePurchase(
                 sku, finalDeveloperPayload, args.externalId, args.paymentMethodId ?? -1, args.paymentToken, args.allowTokenOnlyFinishedStatusWithoutOrderId,
                 callback: XsollaClientBridgeHelpersIOS.OnXsollaUnityBridgeJsonCallback, 

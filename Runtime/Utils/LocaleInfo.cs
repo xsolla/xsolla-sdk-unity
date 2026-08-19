@@ -23,7 +23,9 @@ namespace Xsolla.SDK.Utils
         {
             try
             {
-                var cultureInfo = new CultureInfo(locale);
+                // Accept both the BCP-47/.NET delimiter (en-US) and the Java/Apple one (en_US).
+                // CultureInfo requires '-', so normalize '_' first. See SDK-4883.
+                var cultureInfo = new CultureInfo(locale?.Replace('_', '-'));
                 return new LocaleInfo(cultureInfo);
             }
             catch (Exception e)
@@ -84,6 +86,14 @@ namespace Xsolla.SDK.Utils
                 }
             }
         }
+
+        /// <summary>
+        /// The locale code in the underscore form (e.g. <c>en_US</c>) expected by the native mobile SDKs.
+        /// C#/BCP-47 uses a hyphen (<c>en-US</c>); Apple's <c>Locale</c> accepts both, but Android's
+        /// <c>LocaleInfo.parse</c> only matches <c>java.util.Locale.toString()</c> (underscore), so a
+        /// hyphenated code is silently dropped there. Pass this to native instead of the raw string. See SDK-4883.
+        /// </summary>
+        public string nativeCode => cultureInfo.Name.Replace('-', '_');
 
         /// <summary>
         /// Returns the locale name as a string.

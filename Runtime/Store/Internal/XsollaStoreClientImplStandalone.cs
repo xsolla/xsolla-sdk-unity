@@ -20,6 +20,8 @@ namespace Xsolla.SDK.Store
     {
         private const string Tag = "XsollaStoreClientImplSDK";
 
+        private static readonly System.Random RetryJitterRandom = new System.Random();
+
         [Serializable, UsedImplicitly]
         private class ReceiptForJson
         {
@@ -311,6 +313,12 @@ namespace Xsolla.SDK.Store
 
             if (args?.paymentMethodId != null && args.paymentMethodId >= 0)
                 getPurchaseParams().payment_method = args.paymentMethodId;
+
+            if (!string.IsNullOrEmpty(args?.externalTransactionToken))
+            {
+                onError?.Invoke($"External transaction token is not supported on this platform ({Application.platform})");
+                return;
+            }
 
             if (!string.IsNullOrEmpty(configuration.trackingId))
                 getPurchaseParams().tracking_id = configuration.trackingId;
@@ -817,7 +825,7 @@ namespace Xsolla.SDK.Store
                             delayMillis = Math.Min(delayMillis, backoff.maxIntervalMillis.Value);
 
                         var jitter = backoff.maxRandomExtraDelayMillis.HasValue
-                            ? UnityEngine.Random.Range(0, (int)backoff.maxRandomExtraDelayMillis.Value)
+                            ? RetryJitterRandom.Next(0, (int)backoff.maxRandomExtraDelayMillis.Value)
                             : 0;
 
                         return (delayMillis + jitter) / 1000f;

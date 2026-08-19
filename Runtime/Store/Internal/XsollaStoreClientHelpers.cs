@@ -70,11 +70,13 @@ namespace Xsolla.SDK.Store
         
         public static string PurchaseToJson(
             string sku, string developerPayload, string externalId,
-            [CanBeNull] string paymentToken = null, int? paymentMethodId = null, bool allowTokenOnlyFinishedStatusWithoutOrderId = false
+            [CanBeNull] string paymentToken = null, int? paymentMethodId = null, bool allowTokenOnlyFinishedStatusWithoutOrderId = false,
+            [CanBeNull] string externalTransactionToken = null
         )
         {
             var data = new XsollaStoreClientPaymentData(
-                sku, developerPayload, externalId, paymentToken, paymentMethodId, allowTokenOnlyFinishedStatusWithoutOrderId
+                sku, developerPayload, externalId, paymentToken, paymentMethodId, allowTokenOnlyFinishedStatusWithoutOrderId,
+                externalTransactionToken
             );
             return XsollaClientHelpers.ToJson(data);
         }
