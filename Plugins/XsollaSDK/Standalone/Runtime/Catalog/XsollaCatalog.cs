@@ -374,7 +374,7 @@ namespace Xsolla.Catalog
 
 		private static IEnumerator RetryAfter(float seconds, Action action)
 		{
-			yield return new WaitForSeconds(seconds);
+			yield return new WaitForSecondsRealtime(seconds);
 			action();
 		}
 

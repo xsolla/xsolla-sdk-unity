@@ -103,6 +103,7 @@ namespace Xsolla.SDK.Store
                                             onUnorderedPurchaseProduct?.Invoke(
                                                 XsollaStoreClientPurchasedProduct.Builder.Create()
                                                     .SetOrderId(evt.order_id)
+                                                    .SetInvoiceId(evt.transaction_id ?? string.Empty)
                                                     .SetTransactionId(evt.transaction_id ?? Guid.NewGuid().ToString())
                                                     .SetSku(evt.sku)
                                                     .SetQuantity(evt.quantity)
@@ -207,6 +208,7 @@ namespace Xsolla.SDK.Store
                     onSuccess?.Invoke(result.Map(evt =>
                         XsollaStoreClientPurchasedProduct.Builder.Create()
                             .SetOrderId(evt.order_id)
+                            .SetInvoiceId(evt.transaction_id ?? string.Empty)
                             .SetTransactionId(evt.transaction_id ?? Guid.NewGuid().ToString())
                             .SetSku(evt.sku)
                             .SetQuantity(evt.quantity)

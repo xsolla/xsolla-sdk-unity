@@ -21,7 +21,7 @@ namespace Xsolla.SDK.UnityPurchasing
         private const string Tag = "XsollaPurchasingStore";
         
         [CanBeNull] private IStoreCallback _storeCallback;
-        private readonly IXsollaStoreClient _storeClient = XsollaStoreClientFactory.Create();
+        private readonly IXsollaStoreClient _storeClient;
 
         private readonly ISimpleFuture<XsollaClientConfiguration, string> _settingsFuture;
         [CanBeNull] private ISimpleFuture<bool, string> _initializedFuture;
@@ -29,22 +29,68 @@ namespace Xsolla.SDK.UnityPurchasing
         
         private readonly Dictionary<string, XsollaStoreClientProduct> _productById = new Dictionary<string, XsollaStoreClientProduct>();
 
-        // Unity IAP only hands FinishTransaction a transaction ID, but consuming a collapsed
-        // multi-unit restore needs the purchased quantity. Remember it per transaction here when the
-        // purchase is reported, then drain that many units in FinishTransaction.
-        // Not synchronized: every access (OnPurchaseSucceeded, FinishTransaction) runs on the Unity
-        // main thread, because the standalone client delivers all web-request callbacks via coroutine
-        // continuations. Same invariant as _productById above.
-        private readonly Dictionary<string, int> _quantityByTransactionId = new Dictionary<string, int>();
+        /// <summary>
+        /// Purchased quantity per (transaction, sku), recorded when the purchase is reported and drained in
+        /// <see cref="FinishTransaction"/>.
+        /// <para/>
+        /// Unity IAP only hands <see cref="FinishTransaction"/> a transaction id, but consuming a collapsed
+        /// multi-unit restore needs the purchased quantity. Keyed by sku as well, not by transaction id alone:
+        /// a transaction id is not guaranteed to own a single sku (bundle and virtual-currency content lines
+        /// share one), so a transaction-only key lets the last line overwrite the rest.
+        /// <para/>
+        /// Not synchronized: every access runs on the Unity main thread, because the standalone client delivers
+        /// all web-request callbacks via coroutine continuations. Same invariant as <c>_productById</c> above.
+        /// </summary>
+        private readonly Dictionary<(string transactionId, string sku), int> _quantityByPurchase =
+            new Dictionary<(string transactionId, string sku), int>();
+
+        /// <summary>
+        /// Where each (transaction, sku) stands in the consume pipeline, so a repeated
+        /// <see cref="FinishTransaction"/> for a purchase already being (or already) consumed is dropped.
+        /// <para/>
+        /// Unity IAP finishes the same purchase more than once: its <c>ProcessPurchaseOnStart</c> walks the whole
+        /// product catalog on every <c>OnProductsRetrieved</c> and re-finishes every transaction already in its
+        /// log, with no <c>ProcessPurchase</c> in between — so any later <c>FetchAdditionalProducts</c> re-finishes
+        /// an earlier restored purchase. Unguarded, that second finish consumes again: a real second inventory
+        /// consume on Standalone and iOS, and on Android a consume whose purchase token the receipt cache has
+        /// already spent.
+        /// <para/>
+        /// A failed consume drops its key so a later finish can retry; <see cref="ConsumeState.Done"/> is never
+        /// cleared, making the guard session-scoped by design — the server stays the source of truth across runs.
+        /// Same main-thread-only invariant as <see cref="_quantityByPurchase"/>.
+        /// </summary>
+        private readonly Dictionary<(string transactionId, string sku), ConsumeState> _consumeStateByPurchase =
+            new Dictionary<(string transactionId, string sku), ConsumeState>();
+
+        /// <summary>
+        /// Stage of the consume pipeline tracked in <see cref="_consumeStateByPurchase"/>.
+        /// </summary>
+        private enum ConsumeState
+        {
+            /// <summary>A consume has been dispatched to the store client and has not called back yet.</summary>
+            InFlight,
+
+            /// <summary>The consume completed successfully; further finishes for this purchase are no-ops.</summary>
+            Done
+        }
 
         [CanBeNull] private Action<IStoreCallback, string, string, string> onPurchaseSucceeded;
         [CanBeNull] private Action<IStoreCallback, PurchaseFailureDescription> onPurchaseFailed;
         
         [CanBeNull] private XsollaPurchasingStoreValidator _validator;
 
-        public XsollaPurchasingStore(XsollaClientConfiguration configuration) {
+        public XsollaPurchasingStore(XsollaClientConfiguration configuration)
+            : this(configuration, XsollaStoreClientFactory.Create()) { }
+
+        /// <summary>
+        /// Takes the store client explicitly so tests can drive the store against a stub instead of the
+        /// platform client <see cref="XsollaStoreClientFactory"/> would pick.
+        /// </summary>
+        internal XsollaPurchasingStore(XsollaClientConfiguration configuration, IXsollaStoreClient storeClient) {
+            _storeClient = storeClient;
+
             RunOnStartThread.Create();
-            
+
             _settingsFuture = SimpleFuture.Create<XsollaClientConfiguration, string>(out var promise);
             XsollaLogger.SetLogLevel(configuration.logLevel);
             if (configuration.delayedTask != null)
@@ -166,7 +212,7 @@ namespace Xsolla.SDK.UnityPurchasing
                                 if (!string.IsNullOrEmpty(purchasedItem.transactionId))
                                 {
                                     var trackedQuantity = purchasedItem.quantity > 0 ? purchasedItem.quantity : 1;
-                                    _quantityByTransactionId[purchasedItem.transactionId] = trackedQuantity;
+                                    _quantityByPurchase[(purchasedItem.transactionId, item.sku)] = trackedQuantity;
                                     XsollaLogger.Debug(Tag, $"RetrieveProducts: tracking restored sku={item.sku} quantity={trackedQuantity} transactionId={purchasedItem.transactionId} (will consume {trackedQuantity} unit(s) on FinishTransaction)");
                                 }
 
@@ -231,7 +277,7 @@ namespace Xsolla.SDK.UnityPurchasing
             XsollaLogger.Debug(Tag, $"Purchase finished: {product}");
 
             if (!string.IsNullOrEmpty(product.transactionId))
-                _quantityByTransactionId[product.transactionId] = product.quantity > 0 ? product.quantity : 1;
+                _quantityByPurchase[(product.transactionId, product.sku)] = product.quantity > 0 ? product.quantity : 1;
 
             _productsFuture?.OnComplete(
                 onSuccess: loaded =>
@@ -294,20 +340,32 @@ namespace Xsolla.SDK.UnityPurchasing
         {
             var sku = product.storeSpecificId;
 
+            var purchase = (transactionId, sku);
+
+            // An empty transaction id cannot be tracked in either dictionary, so such a finish is neither
+            // guarded nor remembered — it consumes one unit, which is what it did before the guard existed.
+            var isTracked = !string.IsNullOrEmpty(transactionId);
+
             if (product.type != ProductType.Consumable)
             {
                 XsollaLogger.Debug(Tag, $"FinishTransaction: sku={sku} transactionId={transactionId} type={product.type} — not consumable, nothing to consume.");
 
                 // Non-consumables are never consumed, so drop any tracked quantity here to avoid leaking the entry.
-                if (!string.IsNullOrEmpty(transactionId))
-                    _quantityByTransactionId.Remove(transactionId);
+                if (isTracked)
+                    _quantityByPurchase.Remove(purchase);
 
+                return;
+            }
+
+            if (isTracked && _consumeStateByPurchase.TryGetValue(purchase, out var consumeState))
+            {
+                XsollaLogger.Debug(Tag, $"FinishTransaction: ignoring a duplicate finish (state={consumeState}) sku={sku} transactionId={transactionId}");
                 return;
             }
 
             int quantity;
             string quantitySource;
-            if (!string.IsNullOrEmpty(transactionId) && _quantityByTransactionId.TryGetValue(transactionId, out var tracked))
+            if (isTracked && _quantityByPurchase.TryGetValue(purchase, out var tracked))
             {
                 quantity = tracked;
                 quantitySource = quantity > 1 ? "collapsed multi-unit" : "tracked single unit";
@@ -320,17 +378,32 @@ namespace Xsolla.SDK.UnityPurchasing
 
             XsollaLogger.Debug(Tag, $"FinishTransaction: consuming sku={sku} quantity={quantity} ({quantitySource}) transactionId={transactionId}");
 
+            if (isTracked)
+                _consumeStateByPurchase[purchase] = ConsumeState.InFlight;
+
             _storeClient.ConsumeProduct(sku, quantity, transactionId,
                 onSuccess: () =>
                 {
-                    // Drop the entry only after a confirmed consume so a failed or repeated
-                    // FinishTransaction still drains the full multi-unit quantity instead of defaulting to 1.
-                    if (!string.IsNullOrEmpty(transactionId))
-                        _quantityByTransactionId.Remove(transactionId);
+                    if (isTracked)
+                    {
+                        _consumeStateByPurchase[purchase] = ConsumeState.Done;
+
+                        // Drop the quantity only after a confirmed consume so a retried finish still drains the
+                        // full multi-unit quantity instead of defaulting to 1.
+                        _quantityByPurchase.Remove(purchase);
+                    }
 
                     XsollaLogger.Debug(Tag, $"FinishTransaction finished: sku={sku} consumed {quantity} unit(s) in a single consume.");
                 },
-                onError: error => XsollaLogger.Error(Tag, $"FinishTransaction failed: sku={sku} quantity={quantity} transactionId={transactionId}: {error}")
+                onError: error =>
+                {
+                    // Release the in-flight mark so a later finish can retry this purchase, and keep its tracked
+                    // quantity for that retry.
+                    if (isTracked)
+                        _consumeStateByPurchase.Remove(purchase);
+
+                    XsollaLogger.Error(Tag, $"FinishTransaction failed: sku={sku} quantity={quantity} transactionId={transactionId}: {error}");
+                }
             );
         }
 

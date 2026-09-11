@@ -1,15 +1,25 @@
+## [3.1.19] - 2026-09-11
+
+### Changed
+
+- Android: updated SDK to `3.0.55` (payment and login flow queueing, payment redirect handling, surviving config changes and split-screen resize, stable order IDs on restore, auth crash fixes)
+
+### Fixed
+
+- All platforms: a restored purchase is now consumed only once; Unity IAP re-finishes an already-finished transaction on every catalog refresh, which failed with a consume error on Android and could drain an extra inventory unit elsewhere
+- Win/Mac: restored purchases from the Events API now carry `invoiceId`, matching the normal purchase completion path and the Android/iOS behavior
+- Win/Mac/WebGL: order status polling, the cached-order success callback, the create-order cooldown, and catalog fetch retries now use unscaled time; previously they stalled while the game set `Time.timeScale` to `0`
+
 ## [3.1.18] - 2026-08-19
 
 ### Added
 
 - Added `XsollaStoreClientPurchaseArgs.Builder.SetExternalTransactionToken(string)` for passing external transaction token on supported platforms
-
 - Android: Added support for `XsollaStoreClientPurchaseArgs.Builder.SetExternalTransactionToken(string)` setter
 
 ### Changed
 
 - Android: updated SDK to `3.0.52`
-
 - iOS: updated SDK to `3.10.0`
 
 ### Fixed

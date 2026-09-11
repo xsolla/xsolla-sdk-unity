@@ -21,7 +21,16 @@ namespace Xsolla.SDK.Store
             [NotNull] public readonly XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback stateListener;
             [NotNull] public readonly XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback paymentListener;
             [NotNull] public readonly ISimpleFuture<bool, string> initializeFuture;
-            [CanBeNull] public Dictionary<string, string> transactionIdToPurchaseTokenDict;
+
+            /// <summary>
+            /// Purchase token per (transaction, sku), as a <see cref="ReceiptEntry"/> — see that type for the
+            /// state model.
+            /// <para/>
+            /// Keyed by sku as well, not by transaction id alone: bundle and virtual-currency purchases are
+            /// delivered as several content lines that share one transaction id but each carry a distinct
+            /// receipt, so a transaction-only key lets one line's token overwrite another's.
+            /// </summary>
+            [CanBeNull] public Dictionary<(string transactionId, string sku), ReceiptEntry> receiptCache;
 
             public InitData(
                 [NotNull] XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback stateListener,
@@ -32,6 +41,41 @@ namespace Xsolla.SDK.Store
                 this.paymentListener = paymentListener;
                 this.initializeFuture = initializeFuture;
             }
+        }
+
+        /// <summary>
+        /// Cache value for one purchased content line. An explicit two-state model that replaces a nullable
+        /// receipt string whose <c>null</c>/<c>""</c>/token meanings had to be reverse-engineered from the
+        /// consume code. A key absent from the cache means the purchase is unrecognized.
+        /// </summary>
+        private abstract class ReceiptEntry
+        {
+            /// <summary>
+            /// Awaiting a consume, carrying the purchase token to consume with. The token may be empty for a
+            /// free or zero-price line.
+            /// </summary>
+            public sealed class Pending : ReceiptEntry
+            {
+                public readonly string Receipt;
+
+                public Pending(string receipt)
+                {
+                    Receipt = receipt ?? "";
+                }
+            }
+
+            /// <summary>
+            /// Already consumed this session, so a consume repeated for it resolves as an idempotent success
+            /// rather than spending a token the native bridge has already consumed.
+            /// </summary>
+            public sealed class Consumed : ReceiptEntry
+            {
+                public static readonly Consumed Instance = new();
+
+                private Consumed() { }
+            }
+
+            private ReceiptEntry() { }
         }
 
         #endregion
@@ -245,7 +289,7 @@ namespace Xsolla.SDK.Store
                                 var products = XsollaStoreClientHelpers.JsonToRestoredItems(result);
 
                                 foreach (var product in products) {
-                                    AddReceiptToCache(product.transactionId, product.receipt);
+                                    AddReceiptToCache(product.transactionId, product.sku, product.receipt);
                                 }
 
                                 onSuccess?.Invoke(products);
@@ -308,7 +352,7 @@ namespace Xsolla.SDK.Store
                 "Purchase",
                 onSuccess: s => {
                     var product = XsollaStoreClientHelpers.JsonToPurchase(s, finalDeveloperPayload);
-                    AddReceiptToCache(product.transactionId, product.receipt);
+                    AddReceiptToCache(product.transactionId, product.sku, product.receipt);
                     onSuccess?.Invoke(product);
                 },
                 onError: error => {
@@ -347,14 +391,15 @@ namespace Xsolla.SDK.Store
         {
             XsollaLogger.Debug(Tag, $"[XsollaStoreClientImplAndroid] Consume product (sku={sku} quantity={quantity} transactionId={transactionId}");
 
-            var transactionIdToPurchaseTokenDict = m_InitData?.transactionIdToPurchaseTokenDict;
-            if (transactionIdToPurchaseTokenDict == null) {
+            if (m_InitData?.receiptCache == null) {
                 XsollaLogger.Debug(Tag, "Receipt cache doesn't exist, populating..");
 
                 RestorePurchases(
                     onSuccess: _ => performConsumption(),
                     onError: err => {
-                        XsollaClientBridgeHelpersAndroid.ReportError(Tag, $"[ConsumeProduct] Failed to cache unconsumed purchase receipts:\n{err}");
+                        XsollaClientBridgeHelpersAndroid.ReportError(Tag,
+                            $"[ConsumeProduct] Failed to cache unconsumed purchase receipts:\n{err}"
+                        );
                         performConsumption();
                     }
                 );
@@ -363,22 +408,33 @@ namespace Xsolla.SDK.Store
             }
 
             void performConsumption() {
-                if (transactionIdToPurchaseTokenDict == null ||
-                    !transactionIdToPurchaseTokenDict.TryGetValue(transactionId, out var receipt)) {
-                    XsollaLogger.Debug(Tag, $"[ConsumeProduct] Unrecognized transaction ID: {transactionId}");
-                    onError?.Invoke($"Consumption failed due to the unknown transaction ID: {transactionId}");
-                } else {
+                // Read the live field rather than closing over one captured above: when the branch above found
+                // it `null` it repopulated it through `RestorePurchases` -> `AddReceiptToCache`, which assigns
+                // `m_InitData.receiptCache`. A captured local would still be `null` here and the populate path
+                // would always error out.
+                var receiptCache = m_InitData?.receiptCache;
+                if (receiptCache == null || !receiptCache.TryGetValue((transactionId, sku), out var entry)) {
+                    XsollaLogger.Debug(Tag, $"[ConsumeProduct] Unrecognized purchase: transactionId={transactionId} sku={sku}");
+                    onError?.Invoke($"Consumption failed due to the unknown purchase: transactionId={transactionId} sku={sku}");
+                } else if (entry is ReceiptEntry.Consumed) {
+                    // Unity IAP finishes the same transaction twice (`ProcessPurchaseOnStart` re-finishes every
+                    // already-logged transaction on each `OnProductsRetrieved`); the second finish would
+                    // otherwise fire a tokenless consume and be rejected by the native bridge.
+                    XsollaLogger.Debug(Tag, $"[ConsumeProduct] Already consumed this session, ignoring duplicate (sku={sku} transactionId={transactionId}).");
+                    onSuccess.Invoke();
+                } else if (entry is ReceiptEntry.Pending pending) {
                     XsollaClientBridgeHelpersAndroid.JavaCall(
                         method: "Consume",
-                        json: XsollaStoreClientHelpers.ConsumeToJson(sku, quantity, transactionId, receipt),
+                        json: XsollaStoreClientHelpers.ConsumeToJson(sku, quantity, transactionId, pending.Receipt),
                         callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "Consume",
                             onSuccess: _ => {
-                                if (transactionIdToPurchaseTokenDict != null) {
-                                    transactionIdToPurchaseTokenDict[transactionId] = null;
+                                var liveReceiptCache = m_InitData?.receiptCache;
+                                if (liveReceiptCache != null) {
+                                    liveReceiptCache[(transactionId, sku)] = ReceiptEntry.Consumed.Instance;
                                 } else {
-                                    XsollaLogger.Debug(Tag, "[ConsumeProduct] Tried to update the receipt " +
-                                        $"cache on successful consumption, but it doesn't exist (sku={sku} " +
-                                        $"transactionId={transactionId} receipt={receipt})"
+                                    XsollaLogger.Debug(Tag, "[ConsumeProduct] Tried to mark the receipt " +
+                                        $"cache consumed on successful consumption, but it doesn't exist (sku={sku} " +
+                                        $"transactionId={transactionId})"
                                     );
                                 }
 
@@ -387,6 +443,13 @@ namespace Xsolla.SDK.Store
                             onError: error => onError?.Invoke(error)
                         )
                     );
+                } else {
+                    // Unreachable: `ReceiptEntry` is a closed `Pending`|`Consumed` hierarchy. Defensive branch so
+                    // a future entry kind cannot silently fall through to a no-op that strands the transaction.
+                    XsollaClientBridgeHelpersAndroid.ReportError(Tag,
+                        $"[ConsumeProduct] Unexpected receipt entry {entry.GetType().Name} (sku={sku} transactionId={transactionId})"
+                    );
+                    onError?.Invoke($"Consumption failed due to an unexpected receipt entry (sku={sku} transactionId={transactionId})");
                 }
             }
         }
@@ -470,27 +533,33 @@ namespace Xsolla.SDK.Store
             }
         }
 
-        private void AddReceiptToCache(string transactionId, string receipt)
+        private void AddReceiptToCache(string transactionId, string sku, string receipt)
         {
             if (m_InitData == null) {
-                XsollaClientBridgeHelpersAndroid.ReportError(Tag, "Failed to add a receipt to cache because it's not initialized");
+                XsollaClientBridgeHelpersAndroid.ReportError(Tag,
+                    "Failed to add a receipt to cache because it's not initialized"
+                );
                 return;
             }
 
-            var transactionIdToPurchaseTokenDict =
-                m_InitData.transactionIdToPurchaseTokenDict ??= new Dictionary<string, string>(capacity: 4);
+            var receiptCache =
+                m_InitData.receiptCache ??= new Dictionary<(string transactionId, string sku), ReceiptEntry>(capacity: 4);
 
-            if (
-                transactionIdToPurchaseTokenDict.TryGetValue(transactionId, out var existingReceipt) &&
-                !string.IsNullOrEmpty(existingReceipt) && existingReceipt != receipt
-            ) {
+            var key = (transactionId, sku);
+
+            // Only warn when overwriting a still-`Pending` purchase whose non-empty token differs — a `Consumed`
+            // entry being re-armed by a fresh delivery is expected, not a conflict.
+            if (receiptCache.TryGetValue(key, out var existing) &&
+                existing is ReceiptEntry.Pending existingPending &&
+                !string.IsNullOrEmpty(existingPending.Receipt) &&
+                existingPending.Receipt != receipt) {
                 XsollaLogger.Warning(Tag, "Cache already had a receipt assigned to a " +
-                    $"transaction (transactionId={transactionId} newReceipt={receipt} " +
-                    $"oldReceipt={existingReceipt})"
+                    $"purchase (transactionId={transactionId} sku={sku} newReceipt={receipt} " +
+                    $"oldReceipt={existingPending.Receipt})"
                 );
             }
 
-            transactionIdToPurchaseTokenDict[transactionId] = receipt;
+            receiptCache[key] = new ReceiptEntry.Pending(receipt);
         }
 
         private void CancelActivePurchase_()

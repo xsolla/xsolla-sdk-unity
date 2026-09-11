@@ -40,7 +40,7 @@ namespace Xsolla.Core
 
 			while (true)
 			{
-				yield return new WaitForSeconds(Constants.SHORT_POLLING_INTERVAL);
+				yield return new WaitForSecondsRealtime(Constants.SHORT_POLLING_INTERVAL);
 				CheckOrderStatus(
 					onDone: (status) => HandleOrderDone(status), 
 					onCancel: () => RemoveSelfFromTracking(), 
