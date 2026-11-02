@@ -74,6 +74,20 @@ namespace Xsolla.SDK.UnityPurchasing
             Done
         }
 
+        /// <summary>
+        /// Every (transaction, sku) already handed to Unity IAP this session, so a duplicate delivery is dropped.
+        /// <para/>
+        /// Catches a native re-delivery of an owned, unconsumed item and a restore racing a purchase. A genuine
+        /// re-purchase gets a new transaction id, so it is not blocked. Caveat: this also drops a re-delivery that
+        /// would have retried a first delivery whose validation or consume failed; that purchase stays pending and
+        /// resurfaces next session.
+        /// Marked wherever a purchase reaches Unity IAP: in <see cref="OnPurchaseSucceeded"/> and as a receipt on a
+        /// product in the first <see cref="RetrieveProducts"/>.
+        /// Same main-thread-only invariant as <see cref="_quantityByPurchase"/>.
+        /// </summary>
+        private readonly HashSet<(string transactionId, string sku)> _deliveredPurchases =
+            new HashSet<(string transactionId, string sku)>();
+
         [CanBeNull] private Action<IStoreCallback, string, string, string> onPurchaseSucceeded;
         [CanBeNull] private Action<IStoreCallback, PurchaseFailureDescription> onPurchaseFailed;
         
@@ -213,6 +227,10 @@ namespace Xsolla.SDK.UnityPurchasing
                                 {
                                     var trackedQuantity = purchasedItem.quantity > 0 ? purchasedItem.quantity : 1;
                                     _quantityByPurchase[(purchasedItem.transactionId, item.sku)] = trackedQuantity;
+                                    // The receipt below is a delivery too: without the mark, a later RestoreTransactions or
+                                    // native re-delivery, or a purchase callback queued behind this fetch, would hand it to
+                                    // Unity IAP again.
+                                    _deliveredPurchases.Add((purchasedItem.transactionId, item.sku));
                                     XsollaLogger.Debug(Tag, $"RetrieveProducts: tracking restored sku={item.sku} quantity={trackedQuantity} transactionId={purchasedItem.transactionId} (will consume {trackedQuantity} unit(s) on FinishTransaction)");
                                 }
 
@@ -276,12 +294,22 @@ namespace Xsolla.SDK.UnityPurchasing
         {
             XsollaLogger.Debug(Tag, $"Purchase finished: {product}");
 
-            if (!string.IsNullOrEmpty(product.transactionId))
+            // A duplicate delivery must neither overwrite the tracked quantity nor re-add one a consume already drained.
+            if (!string.IsNullOrEmpty(product.transactionId) && !_deliveredPurchases.Contains((product.transactionId, product.sku)))
                 _quantityByPurchase[(product.transactionId, product.sku)] = product.quantity > 0 ? product.quantity : 1;
 
             _productsFuture?.OnComplete(
                 onSuccess: loaded =>
                 {
+                    // Marked here rather than on entry: a purchase reported before the first RetrieveProducts never
+                    // reaches Unity IAP, and marking it would make a later RestoreTransactions drop it as well.
+                    if (!string.IsNullOrEmpty(product.transactionId) &&
+                        !_deliveredPurchases.Add((product.transactionId, product.sku)))
+                    {
+                        XsollaLogger.Warning(Tag, $"Duplicate delivery ignored: transactionId={product.transactionId} sku={product.sku}");
+                        return;
+                    }
+
                     var receiptData = product.ToReceipt().ToJson();
 
                     if (onPurchaseSucceeded != null)

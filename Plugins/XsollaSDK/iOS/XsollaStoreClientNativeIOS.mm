@@ -1026,6 +1026,10 @@ static SKPaymentSettings* _JsonToPaymentSettingsWithLogLevel(const char* jsonCSt
         settings.attributionUserId = json[@"attributionUserId"];
     }
 
+    if (json[@"installSource"] && [json[@"installSource"] length] > 0) {
+        settings.installSource = json[@"installSource"];
+    }
+
     if (json[@"trackingId"] && [json[@"trackingId"] length] > 0) {
         settings.trackingId = json[@"trackingId"];
     }
@@ -1054,6 +1058,7 @@ static SKPaymentSettings* _JsonToPaymentSettingsWithLogLevel(const char* jsonCSt
                               @"locale",
                               @"userId",
                               @"attributionUserId",
+                              @"installSource",
                               @"trackingId",
                               @"sdkName",
                               @"sdkVersion",

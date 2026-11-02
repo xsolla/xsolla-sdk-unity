@@ -1,3 +1,19 @@
+## [3.1.22] - 2026-11-02
+
+### Added
+
+- Android, iOS: `XsollaClientConfiguration.installSource` and `Builder.SetInstallSource(string)` to report your own distribution channel, such as your website or launcher, instead of the detected one
+
+### Changed
+
+- Android: updated SDK to `3.0.61` (install source; a restored purchase's order ID is now scoped to the project and the user, so the IDs of units still held when updating change once and are reported to Unity IAP as new transactions; `validateAsync` on a restored purchase reports OK; billing flow failures name the SKU in their message (`sku=<id>`); billing flows, product queries, order validation and events requests that never completed on an unexpected failure now report it; up to 32 payment views can wait to open instead of 4; social sign-in rejects a blank authorization code)
+- iOS: updated SDK to `3.14.0`
+- Upgraded `Unity In-App Purchasing` dependency to `4.15.1`: it ships Google Play Billing Library 8, which Google Play requires for new apps and updates (effective August 31, 2026). Also picks up the macOS and visionOS fixes from 4.14.2 and 4.15.1
+
+### Fixed
+
+- `XsollaPurchasingModule` hands each purchase to Unity IAP at most once per session, so the same transaction is no longer reported to Unity IAP again when the native SDK re-delivers an owned, unconsumed item, a restore races a purchase, or `RestoreTransactions` reports a purchase already restored at initialization
+
 ## [3.1.21] - 2026-09-29
 
 ### Added

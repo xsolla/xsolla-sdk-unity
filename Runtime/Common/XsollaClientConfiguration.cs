@@ -76,6 +76,13 @@ namespace Xsolla.SDK.Common
         /// </summary>
         public string attributionUserId = string.Empty;
 
+        /// <summary>
+        /// The channel this build is distributed through, such as your own website or launcher. Purchases
+        /// made in the build are attributed to this channel. Set it when you distribute the build yourself.
+        /// Leave empty and the SDK detects the channel where the platform reports one.
+        /// </summary>
+        public string installSource = string.Empty;
+
         /// <summary>Simple mode setting.</summary>
         [JsonConverter(typeof(StringEnumConverter))]
         public SimpleMode simpleMode = SimpleMode.Off;
@@ -204,6 +211,13 @@ namespace Xsolla.SDK.Common
             /// </summary>
             /// <param name="attributionUserId">The attribution user ID, or empty to leave it unset.</param>
             public Builder SetAttributionUserId(string attributionUserId) { _configuration.attributionUserId = attributionUserId; return this; }
+
+            /// <summary>
+            /// Sets the channel this build is distributed through, such as your own website or launcher.
+            /// Purchases made in the build are attributed to it instead of the detected channel.
+            /// </summary>
+            /// <param name="installSource">The distribution channel, or empty to keep the detected one.</param>
+            public Builder SetInstallSource(string installSource) { _configuration.installSource = installSource; return this; }
 
             /// <summary>
             /// Sets the tracking ID.

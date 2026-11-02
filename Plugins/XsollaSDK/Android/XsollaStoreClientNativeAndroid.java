@@ -1680,6 +1680,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             final var sdkVersion = json.optString("sdkVersion", "unknown");
             final var userId = json.optString("userId", "");
             final var attributionUserId = json.optString("attributionUserId", "");
+            final var installSource = json.optString("installSource", "");
             final String webhooksMode = settings.optString("webhooksMode", "");
 
             final Optional<SocialProviderInfo> maybeSocialProviderInfo = Optional
@@ -1887,7 +1888,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 .withActivityOrientationLock(activityOrientationLock)
                 .withCloseButton(closeButton)
                 .withCustomUserId(userId.isEmpty() ? null : userId)
-                .withAttributionUserId(attributionUserId.isEmpty() ? null : attributionUserId);
+                .withAttributionUserId(attributionUserId.isEmpty() ? null : attributionUserId)
+                .withInstallSource(installSource.isEmpty() ? null : installSource);
 
             final var analyticsConfig = Config.Analytics.getDefault()
                 .withGameEngine(sdkName)

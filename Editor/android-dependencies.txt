@@ -1,1 +1,1 @@
-com.xsolla.android:mobile:3.0.58
+com.xsolla.android:mobile:3.0.61
