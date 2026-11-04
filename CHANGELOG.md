@@ -1,3 +1,14 @@
+## [3.1.23] - 2026-11-04
+
+### Changed
+
+- Android: updated SDK to `3.0.62` (widget sign-in with a locale set now opens the widget in that locale instead of failing to open)
+- README: documented the redirect URIs to register on the OAuth 2.0 client for each Android sign-in method
+
+### Fixed
+
+- Android: builds with minification enabled no longer strip the SDK's Java bridge, which left the SDK unable to initialize; the plugin now ships its own keep rules, so a `-keep` line in your `proguard-user.txt` is no longer needed
+
 ## [3.1.22] - 2026-11-02
 
 ### Added

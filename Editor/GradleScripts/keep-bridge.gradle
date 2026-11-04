@@ -1,0 +1,18 @@
+// Xsolla Unity Plugin - R8 keep rules for the Java bridge.
+//
+// C# reaches com.xsolla.mobile.unity.* only by name (AndroidJavaClass / AndroidJavaProxy), which R8
+// can't trace, so a minified build strips the bridge and the SDK never comes up. The native AAR's
+// consumer rules cover com.xsolla.android.* only, and proguard-user.txt belongs to the game, so the
+// plugin supplies its own rules file to every build type of the launcher module.
+
+def bridgeKeepRulesFile = project.file('xsolla_proguard-bridge.txt')
+def bridgeKeepRules = '-keep class com.xsolla.mobile.unity.** { *; }\n'
+
+// Rewrite only on change so R8's inputs stay up to date between incremental builds.
+if (!bridgeKeepRulesFile.exists() || bridgeKeepRulesFile.text != bridgeKeepRules) {
+    bridgeKeepRulesFile.text = bridgeKeepRules
+}
+
+android.buildTypes.all { buildType ->
+    buildType.proguardFile(bridgeKeepRulesFile)
+}
