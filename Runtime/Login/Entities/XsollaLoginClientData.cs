@@ -1,5 +1,6 @@
 ﻿using System;
 using Xsolla.SDK.Common;
+using Xsolla.SDK.Utils;
 
 namespace Xsolla.SDK.Login
 {
@@ -93,8 +94,12 @@ namespace Xsolla.SDK.Login
         /// Returns a string representation of the token.
         /// </summary>
         /// <returns>A formatted string with token data.</returns>
+        /// <remarks>
+        /// With secret obfuscation on, it obfuscates both tokens.
+        /// </remarks>
         public override string ToString() =>
-            $"XsollaLoginToken: AccessToken={accessToken}, RefreshToken={refreshToken}, ExpirationDate={expirationDate}";
+            $"XsollaLoginToken: AccessToken={LogObfuscation.ObfuscateIfEnabled(accessToken)}, " +
+            $"RefreshToken={LogObfuscation.ObfuscateIfEnabled(refreshToken)}, ExpirationDate={expirationDate}";
 
         /// <summary>
         /// Gets the number of seconds remaining before the token expires.

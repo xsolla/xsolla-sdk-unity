@@ -42,7 +42,7 @@ namespace Xsolla.SDK.Common
         
         public void RunAndDequeueCallbacks([CanBeNull] string result, [CanBeNull] string error)
         {
-            XsollaLogger.Debug(Tag, $"RunAndDequeueCallbacks {result} {error}");
+            XsollaLogger.Debug(Tag, $"RunAndDequeueCallbacks {LogObfuscation.ObfuscateJsonIfEnabled(result)} {error}");
             
             var fired = false;
             if (_callbacks != null) {
@@ -101,7 +101,7 @@ namespace Xsolla.SDK.Common
                 {
                     if (result != null)
                     {
-                        XsollaLogger.Debug(tag, $"{name} result: {result}");
+                        XsollaLogger.Debug(tag, $"{name} result: {LogObfuscation.ObfuscateJsonIfEnabled(result)}");
                         onSuccess(result);
                     }
                     else

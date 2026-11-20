@@ -122,11 +122,17 @@ namespace Xsolla.GetUpdates
                     
                     onSuccess?.Invoke(paymentEvents.ToArray());
                 },
-                onError: error => TokenAutoRefresher.Check(settings, error, onError, () => GetPaymentEvents(settings, onSuccess, onError, markProcessed))
+                onError: error => onError?.Invoke(error)
             );
         }
         
-        public static void GetEvents(XsollaSettings settings, Action<EventItem[]> onSuccess, Action<Error> onError)
+        /// <summary>
+        /// Requests the project's unprocessed events.
+        /// <para/>
+        /// A rejected token is refreshed and the request repeated once; a repeat rejected again fails instead of
+        /// refreshing again, since the Events API can keep rejecting a freshly refreshed token.
+        /// </summary>
+        public static void GetEvents(XsollaSettings settings, Action<EventItem[]> onSuccess, Action<Error> onError, bool isRetry = false)
         {
             var url = new UrlBuilder($"{BaseUrl}/events")
                 .AddProjectIdUnderscore(settings.StoreProjectId)
@@ -141,13 +147,21 @@ namespace Xsolla.GetUpdates
                     onSuccess?.Invoke(events.events);
                 },
                 onError: error => {
-                    TokenAutoRefresher.Check(settings, error, onError, () => GetEvents(settings, onSuccess, onError));
+                    if (isRetry)
+                        onError?.Invoke(error);
+                    else
+                        TokenAutoRefresher.Check(settings, error, onError, () => GetEvents(settings, onSuccess, onError, isRetry: true));
                 },
                 ErrorGroup.EventsErrors
             );
         }
 
-        public static void EventProcessed(XsollaSettings settings, int eventId, Action onSuccess, Action<Error> onError)
+        /// <summary>
+        /// Marks an event processed.
+        /// <para/>
+        /// A rejected token is refreshed and the request repeated once, as in <see cref="GetEvents"/>.
+        /// </summary>
+        public static void EventProcessed(XsollaSettings settings, int eventId, Action onSuccess, Action<Error> onError, bool isRetry = false)
         {
             //onError?.Invoke(new Error(errorMessage: "EventProcessed is DISABLED in Standalone SDK."));
             //return;
@@ -164,7 +178,13 @@ namespace Xsolla.GetUpdates
                 {
                     onSuccess?.Invoke();
                 },
-                onError: error => TokenAutoRefresher.Check(settings, error, onError, () => EventProcessed(settings, eventId, onSuccess, onError)),
+                onError: error =>
+                {
+                    if (isRetry)
+                        onError?.Invoke(error);
+                    else
+                        TokenAutoRefresher.Check(settings, error, onError, () => EventProcessed(settings, eventId, onSuccess, onError, isRetry: true));
+                },
                 ErrorGroup.EventsErrors);
         }
     }

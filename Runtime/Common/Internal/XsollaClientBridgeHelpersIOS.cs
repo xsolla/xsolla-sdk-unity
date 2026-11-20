@@ -46,11 +46,11 @@ namespace Xsolla.SDK.Common
 
             void OnCallbackResult(string result, string error) => RunOnStartThread.Run(() =>
             {
-                XsollaLogger.Debug(Tag, $"{name} callback fire result={result} error={error}");
+                XsollaLogger.Debug(Tag, $"{name} callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
 
                 if (result != null)
                 {
-                    XsollaLogger.Debug(Tag, $"{name} result={result}");
+                    XsollaLogger.Debug(Tag, $"{name} result={LogObfuscation.ObfuscateJsonIfEnabled(result)}");
                     onSuccess?.Invoke(result);
                 }
                 else
@@ -76,7 +76,7 @@ namespace Xsolla.SDK.Common
             
             void OnCallbackResult(string result, string error)  
             {
-                XsollaLogger.Debug(Tag, $"{name} common callback fire result={result} error={error}");
+                XsollaLogger.Debug(Tag, $"{name} common callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
             }
         }
         

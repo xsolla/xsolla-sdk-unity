@@ -71,7 +71,7 @@ namespace Xsolla.SDK.Store
             _onRestore = onRestore;
 
             RunOnStartThread.Create();
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
 
             _settingsFuture = SimpleFuture.Create<XsollaClientConfiguration, string>(out var promise);
             if (configuration.delayedTask != null)
@@ -106,7 +106,7 @@ namespace Xsolla.SDK.Store
         private void Initialize_(XsollaClientConfiguration configuration,
             Action<XsollaStoreClientProduct[], XsollaStoreClientError> completionHandler)
         {
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
 
             _storeImpl.Initialize(
                 configuration,

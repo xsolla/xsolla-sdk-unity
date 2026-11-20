@@ -4,7 +4,9 @@ namespace Xsolla.Core
 	{
 		token,
 		code,
+		state,
 		challenge_id,
+		error,
 		error_code,
 		error_description
 	}

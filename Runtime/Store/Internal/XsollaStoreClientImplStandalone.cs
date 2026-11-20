@@ -63,7 +63,7 @@ namespace Xsolla.SDK.Store
             InitializeResultFunc onSuccess, ErrorFunc onError,
             PurchaseProductResultFunc onSuccessPurchaseProduct, ErrorFunc onErrorPurchase
         ) {
-            XsollaLogger.Debug(Tag, $"Initialize: {XsollaClientHelpers.ConfigurationToJson(configuration)}");
+            XsollaLogger.Debug(Tag, $"Initialize: {LogObfuscation.ObfuscateJsonIfEnabled(XsollaClientHelpers.ConfigurationToJson(configuration))}");
 
             this.configuration = configuration;
             _settings = FillFromConfiguration(configuration);
@@ -110,6 +110,7 @@ namespace Xsolla.SDK.Store
                                                     .SetQuantity(evt.quantity)
                                                     .SetPurchaseTimeMillis(ToUnixMillis(evt.created_at))
                                                     .SetStatus(evt.order_status)
+                                                    .SetOrigin(XsollaStoreClientPurchasedProduct.Origin.Live)
                                                     .SetReceipt(XsollaClientHelpers.ToJson(evt))
                                                     .SetDeveloperPayload(evt.custom_parameters.TryGetValue("custom_payload", out var parameter) ? parameter : string.Empty)
                                                     .Build()
@@ -196,6 +197,7 @@ namespace Xsolla.SDK.Store
                 .SetSku(sku)
                 .SetQuantity(quantity)
                 .SetStatus(XsollaStoreClientPurchasedProduct.Status.Restored)
+                .SetOrigin(XsollaStoreClientPurchasedProduct.Origin.InventoryRestore)
                 .SetReceipt("")
                 .Build();
 
@@ -216,6 +218,7 @@ namespace Xsolla.SDK.Store
                             .SetQuantity(evt.quantity)
                             .SetPurchaseTimeMillis(ToUnixMillis(evt.created_at))
                             .SetStatus(evt.order_status)
+                            .SetOrigin(XsollaStoreClientPurchasedProduct.Origin.EventsRestore)
                             .SetReceipt(XsollaClientHelpers.ToJson(evt))
                             .SetDeveloperPayload(evt.custom_parameters.TryGetValue("custom_payload", out var parameter) ? parameter : string.Empty)
                             .Build()
@@ -336,7 +339,7 @@ namespace Xsolla.SDK.Store
             {
                 if (!string.IsNullOrEmpty(args?.paymentToken))
                 {
-                    XsollaLogger.Debug(Tag, $"PurchaseWithToken: {args.paymentToken}");
+                    XsollaLogger.Debug(Tag, $"PurchaseWithToken: {LogRedaction.Tail(args.paymentToken)}");
 
                     XsollaCatalog.PurchaseWithToken(
                         _settings,
@@ -408,6 +411,7 @@ namespace Xsolla.SDK.Store
                         .SetSku(orderStatus.content != null ? orderStatus.content.items[0].sku : sku)
                         .SetQuantity(orderStatus.content != null ? orderStatus.content.items[0].quantity : 1)
                         .SetStatus(XsollaStoreClientPurchasedProduct.Status.Paid)
+                        .SetOrigin(XsollaStoreClientPurchasedProduct.Origin.Live)
                         .SetReceipt(receipt)
                         .SetDeveloperPayload(finalDeveloperPayload)
                         .Build()
@@ -453,20 +457,32 @@ namespace Xsolla.SDK.Store
             {
                 if (XsollaGetUpdates.transactionIdCache.TryGetValue(transactionId, out var cachedEvent) && cachedEvent.sku == sku)
                 {
-                    XsollaGetUpdates.EventProcessed(_settings, 
+                    // The sub-event is marked only once the purchase event is: a purchase event left without its
+                    // sub-event loses the order it is read with, so it could never be consumed again. A sub-event left
+                    // unmarked is skipped by every later query, so the consume still succeeds.
+                    XsollaGetUpdates.EventProcessed(_settings,
                         cachedEvent.id,
-                        onSuccess: () => onSuccess?.Invoke(),
+                        onSuccess: () =>
+                        {
+                            if (cachedEvent.subid == -1)
+                            {
+                                onSuccess?.Invoke();
+                            }
+                            else
+                            {
+                                XsollaGetUpdates.EventProcessed(_settings,
+                                    cachedEvent.subid,
+                                    onSuccess: () => onSuccess?.Invoke(),
+                                    onError: error =>
+                                    {
+                                        XsollaLogger.Warning(Tag, $"Consume: the purchase event {cachedEvent.id} is processed, its sub-event {cachedEvent.subid} is not: {error}");
+                                        onSuccess?.Invoke();
+                                    }
+                                );
+                            }
+                        },
                         onError: error => onError?.Invoke(error.ToString())
                     );
-
-                    if (cachedEvent.subid != -1)
-                    {
-                        XsollaGetUpdates.EventProcessed(_settings,
-                            cachedEvent.subid,
-                            onSuccess: () => onSuccess?.Invoke(),
-                            onError: error => onError?.Invoke(error.ToString())
-                        );
-                    }
                 }
                 else
                 {
@@ -573,7 +589,7 @@ namespace Xsolla.SDK.Store
             
             void SetToken()
             {
-                _settings.XsollaToken.Create(token, isBasedOnDeviceId: false);
+                _settings.XsollaToken.CreateOrKeepSaved(token);
                 onSuccess?.Invoke();
             }
         }
@@ -633,7 +649,7 @@ namespace Xsolla.SDK.Store
 
                                 XsollaLogger.Debug(Tag, "Trying to authenticate using the social access token:\n" +
                                     $"  Provider={settingsSocialProvider.name}\n" +
-                                    $"  AccessToken={settingsSocialProvider.accessToken}"
+                                    $"  AccessToken={LogRedaction.Tail(settingsSocialProvider.accessToken)}"
                                 );
 
                                 XsollaAuth.AuthWithSocialNetworkAccessToken(
@@ -646,8 +662,8 @@ namespace Xsolla.SDK.Store
                                     {
                                         XsollaLogger.Debug(Tag, $"Successfully authenticated using the social access token (" +
                                             $"provider={settingsSocialProvider.name} " +
-                                            $"accessToken={settingsSocialProvider.accessToken}" +
-                                            $"):\n{_settings.XsollaToken.AccessToken}"
+                                            $"accessToken={LogRedaction.Tail(settingsSocialProvider.accessToken)}" +
+                                            $"):\n{LogRedaction.Tail(_settings.XsollaToken.AccessToken)}"
                                         );
 
                                         promise.Complete(true);
@@ -656,7 +672,7 @@ namespace Xsolla.SDK.Store
                                     {
                                         XsollaLogger.Error(Tag, "Failed to authenticate using the social access token  (" +
                                             $"provider={settingsSocialProvider.name} " +
-                                            $"accessToken={settingsSocialProvider.accessToken}" +
+                                            $"accessToken={LogRedaction.Tail(settingsSocialProvider.accessToken)}" +
                                             $"):\n{error}"
                                         );
 
@@ -882,6 +898,7 @@ namespace Xsolla.SDK.Store
             };
             
             XDebug.SetLogLevel(settings.LogLevel);
+            LogRedaction.IsEnabled = configuration.secretsObfuscated;
             
             var callback = XsollaLogger.GetOnLogCallback();
             if (callback != null) {
@@ -946,7 +963,7 @@ namespace Xsolla.SDK.Store
             }
             
             if (!string.IsNullOrEmpty(configuration.accessToken))
-                settings.XsollaToken.Create(configuration.accessToken, isBasedOnDeviceId: false);
+                settings.XsollaToken.CreateOrKeepSaved(configuration.accessToken);
 
             if (configuration.settings.uiSettings.visibleLogo != XsollaClientSettings.VisibleLogo.Auto)
             {

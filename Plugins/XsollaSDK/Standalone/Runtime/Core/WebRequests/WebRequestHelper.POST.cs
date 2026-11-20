@@ -145,6 +145,12 @@ namespace Xsolla.Core
 			StartCoroutine(PostRequestCor<T>(sdkType, url, data, headers, onComplete, onError, errorsToCheck));
 		}
 
+		public void PostRequest(SdkType sdkType, string url, WWWForm data, Action onComplete = null, Action<Error> onError = null, ErrorGroup errorsToCheck = ErrorGroup.CommonErrors)
+		{
+			var headers = GetAnalyticHeaders(sdkType);
+			StartCoroutine(PostFormRequestCor(sdkType, url, data, headers, onComplete, onError, errorsToCheck));
+		}
+
 		#endregion
 
 		#region PostUploadRequest
@@ -243,6 +249,17 @@ namespace Xsolla.Core
 			{
 				AttachHeadersToPostRequest(webRequest, requestHeaders, false);
 				yield return StartCoroutine(PerformWebRequest<T>(webRequest, onComplete, onError, errorsToCheck));
+			}
+		}
+
+		private IEnumerator PostFormRequestCor(SdkType sdkType, string url, WWWForm data, List<WebRequestHeader> requestHeaders, Action onComplete = null, Action<Error> onError = null, ErrorGroup errorsToCheck = ErrorGroup.CommonErrors)
+		{
+			url = AppendAnalyticsToUrl(sdkType, url);
+
+			using (var webRequest = UnityWebRequest.Post(url, data))
+			{
+				AttachHeadersToPostRequest(webRequest, requestHeaders, false);
+				yield return StartCoroutine(PerformWebRequest(webRequest, onComplete, onError, errorsToCheck));
 			}
 		}
 

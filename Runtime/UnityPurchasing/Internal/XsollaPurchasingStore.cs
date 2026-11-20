@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using JetBrains.Annotations;
 using UnityEngine.Purchasing;
 using UnityEngine.Purchasing.Extension;
@@ -28,6 +29,18 @@ namespace Xsolla.SDK.UnityPurchasing
         [CanBeNull] private ISimpleFuture<bool, string> _productsFuture;
         
         private readonly Dictionary<string, XsollaStoreClientProduct> _productById = new Dictionary<string, XsollaStoreClientProduct>();
+
+        /// <summary>
+        /// The type of every SKU a <see cref="RetrieveProducts"/> call was given, as the first such call gave it, which
+        /// every restore reads to put a non-consumable back under the id Unity IAP logged for it, the recorded purchase id
+        /// or else the native id (see <see cref="WithNativeIdsOfNonConsumables"/>), and every purchase to tell whether its
+        /// holding is to be recorded.
+        /// <para/>
+        /// Unity IAP 4.x keeps the product it registered first when a later fetch of additional products registers the
+        /// SKU again under another type, so a later call's type would differ from the one Unity IAP grants and
+        /// finishes the purchase as. Same main-thread-only invariant as <see cref="_quantityByPurchase"/>.
+        /// </summary>
+        private readonly Dictionary<string, ProductType> _productTypeBySku = new Dictionary<string, ProductType>();
 
         /// <summary>
         /// Purchased quantity per (transaction, sku), recorded when the purchase is reported and drained in
@@ -88,25 +101,58 @@ namespace Xsolla.SDK.UnityPurchasing
         private readonly HashSet<(string transactionId, string sku)> _deliveredPurchases =
             new HashSet<(string transactionId, string sku)>();
 
+        /// <summary>
+        /// The transaction id each purchase of a non-consumable was granted under, by the id the Android SDK made up for
+        /// its holding, which every restore reads to hand the holding over under the id Unity IAP logged at the purchase
+        /// (see <see cref="WithNativeIdsOfNonConsumables"/>). Null where the store client makes up no ids.
+        /// </summary>
+        [CanBeNull] private readonly XsollaNonConsumableTransactionIdsAndroid _nonConsumableTransactionIds;
+
+        /// <summary>
+        /// Every (transaction, sku) of a purchase of a non-consumable handed to Unity IAP this session and not finished
+        /// yet, whose holding <see cref="FinishTransaction"/> records in <see cref="_nonConsumableTransactionIds"/>, with
+        /// <see cref="_accessTokenUpdates"/> as it stood at the delivery.
+        /// Same main-thread-only invariant as <see cref="_quantityByPurchase"/>.
+        /// </summary>
+        private readonly Dictionary<(string transactionId, string sku), long> _nonConsumablePurchasesToRecord =
+            new Dictionary<(string transactionId, string sku), long>();
+
+        /// <summary>
+        /// The number of <see cref="UpdateAccessToken"/> calls, each of which may switch the store to another user.
+        /// Same main-thread-only invariant as <see cref="_quantityByPurchase"/>.
+        /// </summary>
+        private long _accessTokenUpdates;
+
         [CanBeNull] private Action<IStoreCallback, string, string, string> onPurchaseSucceeded;
         [CanBeNull] private Action<IStoreCallback, PurchaseFailureDescription> onPurchaseFailed;
         
         [CanBeNull] private XsollaPurchasingStoreValidator _validator;
 
         public XsollaPurchasingStore(XsollaClientConfiguration configuration)
-            : this(configuration, XsollaStoreClientFactory.Create()) { }
+            : this(configuration, XsollaStoreClientFactory.Create(),
+#if UNITY_ANDROID && !UNITY_EDITOR
+                XsollaNonConsumableTransactionIdsAndroid.InPlayerPrefs()
+#else
+                null
+#endif
+            ) { }
 
         /// <summary>
-        /// Takes the store client explicitly so tests can drive the store against a stub instead of the
-        /// platform client <see cref="XsollaStoreClientFactory"/> would pick.
+        /// Takes the store client and the record of non-consumable purchases explicitly so tests can drive the store
+        /// against a stub instead of the platform client <see cref="XsollaStoreClientFactory"/> would pick.
         /// </summary>
-        internal XsollaPurchasingStore(XsollaClientConfiguration configuration, IXsollaStoreClient storeClient) {
+        internal XsollaPurchasingStore(
+            XsollaClientConfiguration configuration,
+            IXsollaStoreClient storeClient,
+            [CanBeNull] XsollaNonConsumableTransactionIdsAndroid nonConsumableTransactionIds = null
+        ) {
             _storeClient = storeClient;
+            _nonConsumableTransactionIds = nonConsumableTransactionIds;
 
             RunOnStartThread.Create();
 
             _settingsFuture = SimpleFuture.Create<XsollaClientConfiguration, string>(out var promise);
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
             if (configuration.delayedTask != null)
             {
                 AwaitForConfiguration(configuration, promise);
@@ -132,7 +178,7 @@ namespace Xsolla.SDK.UnityPurchasing
             _initializedFuture = SimpleFuture.Create<bool, string>(out var promise);
             _settingsFuture.OnComplete(
                 onSuccess: configuration => {
-                    XsollaLogger.SetLogLevel(configuration.logLevel);
+                    XsollaLogger.Apply(configuration);
                     
                     client.Initialize(
                         configuration, 
@@ -153,7 +199,14 @@ namespace Xsolla.SDK.UnityPurchasing
         public override void RetrieveProducts(ReadOnlyCollection<ProductDefinition> products)
         {
             XsollaLogger.Debug(Tag, "RetrieveProducts");
-            
+
+            // Recorded at the call rather than with the catalog, which a restore may answer before.
+            foreach (var product in products)
+            {
+                if (!_productTypeBySku.ContainsKey(product.storeSpecificId))
+                    _productTypeBySku.Add(product.storeSpecificId, product.type);
+            }
+
             if (_initializedFuture == null) {
                 XsollaLogger.Error(Tag, "RetrieveProducts: not initialized");
                 _storeCallback?.OnProductsRetrieved(new List<ProductDescription>());
@@ -205,8 +258,10 @@ namespace Xsolla.SDK.UnityPurchasing
 
                 productsFuture.OnComplete(
                     onSuccess: items => {
+                        var inventory = WithNativeIdsOfNonConsumables(items.inventory);
+
                         XsollaLogger.Debug(Tag, $"RetrieveProducts finished successfully. " +
-                                        $"Restored: {items.inventory.Length}, " +
+                                        $"Restored: {inventory.Length}, " +
                                         $"Retrieved: {items.store.Length} ( {XsollaClientHelpers.ToJson(items.store)} )");
 
                         //Store url for future use
@@ -216,7 +271,7 @@ namespace Xsolla.SDK.UnityPurchasing
                         _storeCallback?.OnProductsRetrieved(items.store.Map(item => {
                             var localizedPrice = (decimal) item.localizedPrice / 1_000_000;
 
-                            if (items.inventory.FindFirst(it => it.sku == item.sku, out var purchasedItem)) {
+                            if (inventory.FindFirst(it => it.sku == item.sku, out var purchasedItem)) {
                                 // This restore path reaches Unity IAP through OnProductsRetrieved (one
                                 // ProductDescription per SKU), not OnPurchaseSucceeded, so record the
                                 // quantity here too. Without this, FinishTransaction misses the map and
@@ -231,7 +286,10 @@ namespace Xsolla.SDK.UnityPurchasing
                                     // native re-delivery, or a purchase callback queued behind this fetch, would hand it to
                                     // Unity IAP again.
                                     _deliveredPurchases.Add((purchasedItem.transactionId, item.sku));
-                                    XsollaLogger.Debug(Tag, $"RetrieveProducts: tracking restored sku={item.sku} quantity={trackedQuantity} transactionId={purchasedItem.transactionId} (will consume {trackedQuantity} unit(s) on FinishTransaction)");
+                                    var finishOutcome = _productTypeBySku.TryGetValue(item.sku, out var productType) && productType != ProductType.Consumable
+                                        ? $"{productType}, never consumed"
+                                        : $"will consume {trackedQuantity} unit(s) on FinishTransaction";
+                                    XsollaLogger.Debug(Tag, $"RetrieveProducts: tracking restored sku={item.sku} quantity={trackedQuantity} transactionId={purchasedItem.transactionId} ({finishOutcome})");
                                 }
 
                                 var receiptData = purchasedItem.ToReceipt().ToJson();
@@ -310,6 +368,16 @@ namespace Xsolla.SDK.UnityPurchasing
                         return;
                     }
 
+                    if (_nonConsumableTransactionIds != null
+                        && product.status != XsollaStoreClientPurchasedProduct.Status.Restored
+                        && !string.IsNullOrEmpty(product.transactionId)
+                        && product.sku != null
+                        && _productTypeBySku.TryGetValue(product.sku, out var productType)
+                        && productType != ProductType.Consumable)
+                    {
+                        _nonConsumablePurchasesToRecord[(product.transactionId, product.sku)] = _accessTokenUpdates;
+                    }
+
                     var receiptData = product.ToReceipt().ToJson();
 
                     if (onPurchaseSucceeded != null)
@@ -382,6 +450,13 @@ namespace Xsolla.SDK.UnityPurchasing
                 if (isTracked)
                     _quantityByPurchase.Remove(purchase);
 
+                if (_nonConsumableTransactionIds != null
+                    && _nonConsumablePurchasesToRecord.TryGetValue(purchase, out var accessTokenUpdatesAtDelivery))
+                {
+                    _nonConsumablePurchasesToRecord.Remove(purchase);
+                    RecordHoldingOfNonConsumablePurchase(_nonConsumableTransactionIds, sku, transactionId, accessTokenUpdatesAtDelivery);
+                }
+
                 return;
             }
 
@@ -442,7 +517,7 @@ namespace Xsolla.SDK.UnityPurchasing
             _storeClient.RestorePurchases(
                 onSuccess: items =>
                 {
-                    foreach (var item in items)
+                    foreach (var item in WithNativeIdsOfNonConsumables(items))
                     {
                         //if (item.VirtualItemType != VirtualItemType.Consumable)
                         //    continue;
@@ -455,6 +530,129 @@ namespace Xsolla.SDK.UnityPurchasing
                 onError: error => onError?.Invoke(error.ToString())
             );
         }
+
+        /// <summary>
+        /// The restored <paramref name="items"/>, with each identity-less one of a SKU typed
+        /// <see cref="ProductType.NonConsumable"/> or <see cref="ProductType.Subscription"/> put back under the id Unity
+        /// IAP's transaction log holds for it: the transaction id of the purchase this device granted it as, recorded in
+        /// <see cref="_nonConsumableTransactionIds"/>, or else the id the Android SDK made up for it, which earlier
+        /// launches restored it under. The others as they are.
+        /// <para/>
+        /// <see cref="XsollaRestoredTransactionIdsAndroid"/> keeps the made-up id as the invoice id, and the Android SDK
+        /// reported it as order and transaction id alike, so the purchase reads as the Android SDK delivered it. The
+        /// store client's receipt cache keeps its line under the id it gave, which only a consume reads, and a
+        /// non-consumable is never consumed.
+        /// </summary>
+        private XsollaStoreClientPurchasedProduct[] WithNativeIdsOfNonConsumables(XsollaStoreClientPurchasedProduct[] items) =>
+            items.Map(item =>
+            {
+                if (item.sku != null
+                    && _productTypeBySku.TryGetValue(item.sku, out var productType)
+                    && productType != ProductType.Consumable
+                    && HasMadeUpId(item, out var nativeId))
+                {
+                    var transactionId = _nonConsumableTransactionIds?.Find(item.sku, item.invoiceId) ?? item.invoiceId;
+
+                    XsollaLogger.Debug(Tag, $"Restored {productType} under the id Unity IAP logged: sku={item.sku} transactionId={item.transactionId} nativeTransactionId={item.invoiceId} -> transactionId={transactionId}");
+
+                    return XsollaStoreClientPurchasedProduct.Builder.Create()
+                        .SetSku(item.sku)
+                        .SetOrderId(nativeId)
+                        .SetInvoiceId(item.invoiceId)
+                        .SetTransactionId(transactionId)
+                        .SetReceipt(item.receipt)
+                        .SetQuantity(item.quantity)
+                        .SetPurchaseTimeMillis(item.purchaseTimeMillis)
+                        .SetStatus(item.status)
+                        .SetOrigin(item.origin)
+                        .SetDeveloperPayload(item.developerPayload)
+                        .Build();
+                }
+                else
+                {
+                    return item;
+                }
+            });
+
+        /// <summary>
+        /// Reads the inventory and records <paramref name="transactionId"/>, a purchase of non-consumable
+        /// <paramref name="sku"/> Unity IAP has just logged, for every unit of <paramref name="sku"/> the Android SDK
+        /// made up an id for, so the next launches restore the holding under the id Unity IAP logged and do not grant it
+        /// again.
+        /// <para/>
+        /// Read now rather than at the next restore: the made-up id names the user who holds the item now, and a later
+        /// restore may read another user's holding. Every unit of the SKU is recorded, as a non-consumable is either
+        /// owned or not: a unit held before this purchase reached Unity IAP through an earlier restore already.
+        /// <para/>
+        /// Nothing is recorded under an access token that names no user, whose made-up ids every user shares, nor once
+        /// <see cref="UpdateAccessToken"/> was called after the delivery, which <paramref name="accessTokenUpdatesAtDelivery"/>
+        /// tells, as the read may then answer with another user's holding: either record would hand that user's restore to
+        /// Unity IAP under an id it already logged, which it never grants. A read that is skipped, fails or lands before
+        /// the inventory shows the purchase records nothing, and the next launch grants the item once more, as before.
+        /// </summary>
+        private void RecordHoldingOfNonConsumablePurchase(
+            [NotNull] XsollaNonConsumableTransactionIdsAndroid nonConsumableTransactionIds,
+            string sku,
+            string transactionId,
+            long accessTokenUpdatesAtDelivery
+        ) {
+            _storeClient.GetAccessToken(
+                onSuccess: token =>
+                {
+                    if (XsollaNonConsumableTransactionIdsAndroid.NamesUser(token))
+                    {
+                        _storeClient.RestorePurchases(
+                            onSuccess: items =>
+                            {
+                                if (_accessTokenUpdates == accessTokenUpdatesAtDelivery)
+                                    RecordHolding(nonConsumableTransactionIds, sku, transactionId, items);
+                                else
+                                    XsollaLogger.Warning(Tag, $"The access token was updated since the purchase, so its holding is not recorded and its next restore grants it again: sku={sku} transactionId={transactionId}");
+                            },
+                            onError: error => XsollaLogger.Warning(Tag, $"Could not read the holding of a purchased non-consumable, its next restore grants it again: sku={sku} transactionId={transactionId} error={error}")
+                        );
+                    }
+                    else
+                    {
+                        XsollaLogger.Warning(Tag, $"The access token names no user, so the holding of a purchased non-consumable is not recorded and its next restore grants it again: sku={sku} transactionId={transactionId}");
+                    }
+                },
+                onError: error => XsollaLogger.Warning(Tag, $"Could not read the access token, so the holding of a purchased non-consumable is not recorded and its next restore grants it again: sku={sku} transactionId={transactionId} error={error}")
+            );
+        }
+
+        /// <summary>
+        /// Records <paramref name="transactionId"/> for every unit of <paramref name="sku"/> in the inventory
+        /// <paramref name="items"/> the Android SDK made up an id for.
+        /// </summary>
+        private static void RecordHolding(
+            [NotNull] XsollaNonConsumableTransactionIdsAndroid nonConsumableTransactionIds,
+            string sku,
+            string transactionId,
+            XsollaStoreClientPurchasedProduct[] items
+        ) {
+            var recorded = 0;
+            foreach (var item in items)
+            {
+                if (item.sku == sku && HasMadeUpId(item, out _))
+                {
+                    nonConsumableTransactionIds.Record(sku, item.invoiceId, transactionId);
+                    recorded++;
+                }
+            }
+
+            XsollaLogger.Debug(Tag, $"Recorded the holding of a purchased non-consumable: sku={sku} transactionId={transactionId} units={recorded}");
+        }
+
+        /// <summary>
+        /// Whether <paramref name="item"/> is a restored unit whose ids the Android SDK made up, kept by
+        /// <see cref="XsollaRestoredTransactionIdsAndroid"/> as the invoice id, which is given as
+        /// <paramref name="nativeId"/>.
+        /// </summary>
+        private static bool HasMadeUpId(XsollaStoreClientPurchasedProduct item, out long nativeId) =>
+            long.TryParse(item.invoiceId, NumberStyles.None, CultureInfo.InvariantCulture, out nativeId)
+            && nativeId > 0
+            && item.identityless;
 
         public bool TryGetProductIconUrl(Product product, out string url)
         {
@@ -502,6 +700,8 @@ namespace Xsolla.SDK.UnityPurchasing
         public void UpdateAccessToken(string token, Action onSuccess, Action<string> onError)
         {
             XsollaLogger.Debug(Tag, "UpdateAccessToken");
+
+            _accessTokenUpdates++;
             
             _storeClient.UpdateAccessToken(
                 token,

@@ -30,7 +30,7 @@ namespace Xsolla.Auth
         /// <param name="redirectUri">URI to redirect the user to after account confirmation, successful authentication, two-factor authentication configuration, or password reset confirmation.
         ///     Must be identical to the OAuth 2.0 redirect URIs specified in Publisher Account.
         ///     Required if there are several URIs.</param>
-        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. `xsollatest` by default. Required for OAuth 2.0.</param>
+        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. A random per-request value is generated when omitted. Required for OAuth 2.0.</param>
         public static void AuthWithSocialNetworkAccessToken(XsollaSettings settings, string accessToken, string accessTokenSecret, string openId, string provider, Action onSuccess, Action<Error> onError, string redirectUri = null, string state = null)
         {
             if (settings.OAuthClientId != -1 && settings.OAuthClientId != 0) {
@@ -126,7 +126,7 @@ namespace Xsolla.Auth
             var nowEpoch = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
             XDebug.Log(settings, $"XsollaAuth.PopulateMissingExpiryFromJwt: hydrating expiry from JWT exp claim (epoch={expirationEpochSeconds}, relative={expirationEpochSeconds - nowEpoch}s)");
-            XDebug.LogDebug(settings, $"XsollaAuth.PopulateMissingExpiryFromJwt: source access token = {settings.XsollaToken.AccessToken}");
+            XDebug.LogDebug(settings, $"XsollaAuth.PopulateMissingExpiryFromJwt: source access token = {LogRedaction.Tail(settings.XsollaToken.AccessToken)}");
 
             settings.XsollaToken.CreateWithEpochExpiration(
                 settings.XsollaToken.AccessToken,
@@ -190,6 +190,30 @@ namespace Xsolla.Auth
         }
 
         /// <summary>
+        /// Revokes a refresh token on the server, which ends that token's session and no other (OAuth 2.0 only).
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="Logout"/>, it needs no unexpired access token and leaves the user's other sessions alone.
+        /// The server answers success for an unknown or already revoked token too. It neither reads nor clears the saved token.
+        /// </remarks>
+        /// <param name="refreshToken">The refresh token to revoke.</param>
+        /// <param name="onSuccess">Called after the server revoked the token.</param>
+        /// <param name="onError">Called after the request resulted with an error.</param>
+        internal static void RevokeRefreshToken(string refreshToken, Action onSuccess, Action<Error> onError)
+        {
+            var requestData = new WWWForm();
+            requestData.AddField("token", refreshToken);
+            requestData.AddField("token_type_hint", "refresh_token");
+
+            WebRequestHelper.Instance.PostRequest(
+                SdkType.Login,
+                BASE_URL + "/oauth2/token/revoke",
+                requestData,
+                onSuccess,
+                onError);
+        }
+
+        /// <summary>
         /// Authenticates the user via a particular device ID.
         /// </summary>
         /// <remarks>[More about the use cases](https://developers.xsolla.com/sdk/unity/authentication/auth-via-device-id/).</remarks>
@@ -199,7 +223,7 @@ namespace Xsolla.Auth
         /// <param name="redirectUri">URI to redirect the user to after account confirmation, successful authentication, two-factor authentication configuration, or password reset confirmation.
         ///     Must be identical to the OAuth 2.0 redirect URIs specified in Publisher Account.
         ///     Required if there are several URIs.</param>
-        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. `xsollatest` by default. Required for OAuth 2.0.</param>
+        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. A random per-request value is generated when omitted. Required for OAuth 2.0.</param>
         public static void AuthViaDeviceID(XsollaSettings settings, Action onSuccess, Action<Error> onError, DeviceInfo deviceInfo = null, string redirectUri = null, string state = null)
         {
             if (DataProvider.GetPlatform() == RuntimePlatform.WebGLPlayer) {
@@ -220,10 +244,14 @@ namespace Xsolla.Auth
             };
 
             if (settings.OAuthClientId != -1 && settings.OAuthClientId != 0) {
+                var pkce = Pkce.Generate();
+                var resolvedState = GetState(state);
+
                 var url = new UrlBuilder(BASE_URL + $"/oauth2/login/device/{deviceType}")
                     .AddClientId(settings.OAuthClientId)
                     .AddResponseType(GetResponseType())
-                    .AddState(GetState(state))
+                    .AddState(resolvedState)
+                    .AddCodeChallenge(pkce?.Challenge)
                     .AddRedirectUri(RedirectUrlHelper.GetRedirectUrl(settings, redirectUri))
                     .AddScope(GetScope())
                     .Build();
@@ -233,7 +261,7 @@ namespace Xsolla.Auth
                     url,
                     requestData,
                     onComplete: response =>
-                        ParseCodeFromUrlAndExchangeToToken(settings, response.login_url, isBasedOnDeviceId: true, onSuccess, onError),
+                        ParseCodeFromUrlAndExchangeToToken(settings, response.login_url, isBasedOnDeviceId: true, redirectUri, onSuccess, onError, pkce?.Verifier, resolvedState),
                     onError,
                     ErrorGroup.LoginErrors
                 );
@@ -270,14 +298,16 @@ namespace Xsolla.Auth
         /// <param name="redirectUri">URI to redirect the user to after account confirmation, successful authentication, two-factor authentication configuration, or password reset confirmation.
         ///     Must be identical to the OAuth 2.0 redirect URIs specified in Publisher Account.
         ///     Required if there are several URIs.</param>
-        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. Will be `xsollatest` by default. Used only for OAuth2.0 auth.</param>
+        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. A random per-request value is generated when omitted. Used only for OAuth2.0 auth.</param>
         /// <param name="code">Code received from the platform.</param>
         public static void SilentAuth(XsollaSettings settings, string providerName, string appId, string sessionTicket, Action onSuccess, Action<Error> onError, string redirectUri = null, string state = null, string code = null)
         {
+            var resolvedState = GetState(state);
+
             var url = new UrlBuilder(BASE_URL + $"/oauth2/social/{providerName}/cross_auth")
                 .AddClientId(settings.OAuthClientId)
                 .AddResponseType(GetResponseType())
-                .AddState(GetState(state))
+                .AddState(resolvedState)
                 .AddRedirectUri(RedirectUrlHelper.GetRedirectUrl(settings, redirectUri))
                 .AddScope(GetScope())
                 .AddParam("app_id", appId)
@@ -289,7 +319,7 @@ namespace Xsolla.Auth
             WebRequestHelper.Instance.GetRequest<LoginLink>(
                 SdkType.Login,
                 url,
-                response => ParseCodeFromUrlAndExchangeToToken(settings, response.login_url, isBasedOnDeviceId: false, onSuccess, onError),
+                response => ParseCodeFromUrlAndExchangeToToken(settings, response.login_url, isBasedOnDeviceId: false, redirectUri, onSuccess, onError, expectedState: resolvedState),
                 onError);
         }
 
@@ -302,7 +332,7 @@ namespace Xsolla.Auth
         /// <param name="redirectUri">URI to redirect the user to after account confirmation, successful authentication, two-factor authentication configuration, or password reset confirmation.
         ///     Must be identical to the OAuth 2.0 redirect URIs specified in Publisher Account.
         ///     Required if there are several URIs.</param>
-        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. `xsollatest` by default. Required for OAuth 2.0.</param>
+        /// <param name="state">Value used for additional user verification on backend. Must be at least 8 symbols long. A random per-request value is generated when omitted. Required for OAuth 2.0.</param>
         public static string GetSocialNetworkAuthUrl(XsollaSettings settings, SocialProvider provider, string redirectUri = null, string state = null)
         {
             var providerValue = provider.ToApiParameter();
@@ -444,7 +474,7 @@ namespace Xsolla.Auth
                         settings.XsollaToken.Create(response.token, existingRefreshToken, isBasedOnDeviceId);
                     }
 
-                    XDebug.LogDebug(settings, $"XsollaAuth.RefreshSocialToken: new main token = {response.token}");
+                    XDebug.LogDebug(settings, $"XsollaAuth.RefreshSocialToken: new main token = {LogRedaction.Tail(response.token)}");
                     onSuccess?.Invoke();
                 },
                 e =>
@@ -480,7 +510,7 @@ namespace Xsolla.Auth
             var isBasedOnDeviceId = settings.XsollaToken.Exists && settings.XsollaToken.IsBasedOnDeviceId;
 
             XDebug.Log(settings, $"XsollaAuth.RefreshViaSocialClaimsDecay: exchanging still-valid social access token for a fresh OAuth2 token pair (provider={provider}, isBasedOnDeviceId={isBasedOnDeviceId}); social claims will not be carried by the new main token");
-            XDebug.LogDebug(settings, $"XsollaAuth.RefreshViaSocialClaimsDecay: social access token being spent = {socialAccessToken}");
+            XDebug.LogDebug(settings, $"XsollaAuth.RefreshViaSocialClaimsDecay: social access token being spent = {LogRedaction.Tail(socialAccessToken)}");
 
             // Native parity: the Java SDK pins this exchange's `redirect_uri` to
             // the `api/blank` sentinel rather than the consumer's configured
@@ -513,12 +543,15 @@ namespace Xsolla.Auth
         ///     Must be identical to the OAuth 2.0 redirect URIs specified in Publisher Account.
         ///     Required if there are several URIs.</param>
         /// <param name="sdkType">SDK type. Used for internal analytics.</param>
-        public static void ExchangeCodeToToken(XsollaSettings settings, string code, Action onSuccess, Action<Error> onError, string redirectUri = null, SdkType sdkType = SdkType.Login)
+        /// <param name="codeVerifier">PKCE verifier for the challenge sent on the authorize request that produced
+        ///     <paramref name="code"/>. Leave `null` when that request carried no challenge: a verifier for such
+        ///     a code fails the exchange with `010-023`.</param>
+        public static void ExchangeCodeToToken(XsollaSettings settings, string code, Action onSuccess, Action<Error> onError, string redirectUri = null, SdkType sdkType = SdkType.Login, string codeVerifier = null)
         {
-            ExchangeCodeToToken(settings, code, isBasedOnDeviceId: false, onSuccess, onError, redirectUri, sdkType);
+            ExchangeCodeToToken(settings, code, isBasedOnDeviceId: false, onSuccess, onError, redirectUri, sdkType, codeVerifier);
         }
 
-        internal static void ExchangeCodeToToken(XsollaSettings settings, string code, bool isBasedOnDeviceId, Action onSuccess, Action<Error> onError, string redirectUri = null, SdkType sdkType = SdkType.Login)
+        internal static void ExchangeCodeToToken(XsollaSettings settings, string code, bool isBasedOnDeviceId, Action onSuccess, Action<Error> onError, string redirectUri = null, SdkType sdkType = SdkType.Login, string codeVerifier = null)
         {
             const string url = BASE_URL + "/oauth2/token";
 
@@ -527,6 +560,9 @@ namespace Xsolla.Auth
             requestData.AddField("redirect_uri", RedirectUrlHelper.GetRedirectUrl(settings, redirectUri));
             requestData.AddField("grant_type", "authorization_code");
             requestData.AddField("code", code);
+
+            if (!string.IsNullOrEmpty(codeVerifier))
+                requestData.AddField("code_verifier", codeVerifier);
 
             WebRequestHelper.Instance.PostRequest<TokenResponse>(
                 sdkType,
@@ -558,11 +594,15 @@ namespace Xsolla.Auth
 
         private static void ExchangeSocialTokenForOAuth2(XsollaSettings settings, string provider, string socialAccessToken, string accessTokenSecret, string openId, bool isBasedOnDeviceId, Action onSuccess, Action<Error> onError, string redirectUri = null, string state = null)
         {
+            var pkce = Pkce.Generate();
+            var resolvedState = GetState(state);
+
             var url = new UrlBuilder(BASE_URL + $"/oauth2/social/{provider}/login_with_token")
                 .AddClientId(settings.OAuthClientId)
                 .AddResponseType(GetResponseType())
                 .AddRedirectUri(RedirectUrlHelper.GetRedirectUrl(settings, redirectUri))
-                .AddState(GetState(state))
+                .AddState(resolvedState)
+                .AddCodeChallenge(pkce?.Challenge)
                 .AddScope(GetScope())
                 .Build();
 
@@ -577,22 +617,24 @@ namespace Xsolla.Auth
                 SdkType.Login,
                 url,
                 requestData,
-                link => ParseCodeFromUrlAndExchangeToToken(settings, link.login_url, isBasedOnDeviceId, onSuccess, onError),
+                link => ParseCodeFromUrlAndExchangeToToken(settings, link.login_url, isBasedOnDeviceId, redirectUri, onSuccess, onError, pkce?.Verifier, resolvedState),
                 onError,
                 ErrorGroup.LoginErrors);
         }
 
-        private static void ParseCodeFromUrlAndExchangeToToken(XsollaSettings settings, string url, bool isBasedOnDeviceId, Action onSuccess, Action<Error> onError)
+        private static void ParseCodeFromUrlAndExchangeToToken(XsollaSettings settings, string url, bool isBasedOnDeviceId, string redirectUri, Action onSuccess, Action<Error> onError, string codeVerifier = null, string expectedState = null)
         {
+            OAuthState.LogMismatch(expectedState, url);
+
             if (ParseUtils.TryGetValueFromUrl(url, ParseParameter.code, out var parsedCode))
-                ExchangeCodeToToken(settings, parsedCode, isBasedOnDeviceId, onSuccess, onError);
+                ExchangeCodeToToken(settings, parsedCode, isBasedOnDeviceId, onSuccess, onError, redirectUri, codeVerifier: codeVerifier);
             else
                 onError?.Invoke(Error.UnknownError);
         }
 
         private static string GetState(string oauthState)
         {
-            return !string.IsNullOrEmpty(oauthState) ? oauthState : "xsollatest";
+            return OAuthState.Resolve(oauthState);
         }
 
         private static string GetResponseType()

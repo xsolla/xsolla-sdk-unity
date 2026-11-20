@@ -48,7 +48,7 @@ namespace Xsolla.Core
 			else
 			{
 				XDebug.Log(settings, $"TokenAutoRefresher.CheckAndRefreshSocialIfNeeded: social access token expired (provider={claims.Provider}); requesting refresh");
-				XDebug.LogDebug(settings, $"TokenAutoRefresher.CheckAndRefreshSocialIfNeeded: claims = {{provider={claims.Provider}, accessToken={claims.AccessToken}, refreshToken={claims.RefreshToken}}}");
+				XDebug.LogDebug(settings, $"TokenAutoRefresher.CheckAndRefreshSocialIfNeeded: claims = {{provider={claims.Provider}, accessToken={LogRedaction.Tail(claims.AccessToken)}, refreshToken={LogRedaction.Tail(claims.RefreshToken)}}}");
 
 				// Failure here is non-fatal: the main JWT is still valid, so calls
 				// that don't depend on social claims continue to work. Calls that
@@ -89,7 +89,7 @@ namespace Xsolla.Core
 			else
 			{
 				XDebug.Log(settings, $"TokenAutoRefresher.TryClaimsDecayOrReauth: spending still-valid social access token (provider={claims.Provider}) to mint a new main token");
-				XDebug.LogDebug(settings, $"TokenAutoRefresher.TryClaimsDecayOrReauth: claims = {{provider={claims.Provider}, accessToken={claims.AccessToken}, refreshToken={claims.RefreshToken}}}");
+				XDebug.LogDebug(settings, $"TokenAutoRefresher.TryClaimsDecayOrReauth: claims = {{provider={claims.Provider}, accessToken={LogRedaction.Tail(claims.AccessToken)}, refreshToken={LogRedaction.Tail(claims.RefreshToken)}}}");
 
 				XsollaAuth.RefreshViaSocialClaimsDecay(settings, claims.Provider, claims.AccessToken,
 					onSuccess,

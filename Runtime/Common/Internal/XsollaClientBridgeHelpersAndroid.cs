@@ -89,11 +89,11 @@ namespace Xsolla.SDK.Common
         {
             return new XsollaUnityBridgeJsonCallback((result, error) => {
                 
-                XsollaLogger.Debug(Tag, $"{logTag} callback fire result={result} error={error}");
-                
+                XsollaLogger.Debug(Tag, $"{logTag} callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
+
                 RunOnStartThread.Run(() => {
                     if (result != null) {
-                        XsollaLogger.Debug(Tag, $"{logTag} result={result}");
+                        XsollaLogger.Debug(Tag, $"{logTag} result={LogObfuscation.ObfuscateJsonIfEnabled(result)}");
                         onSuccess(result);
                     } else {
                         ReportError(Tag, $"{logTag} failed={error}");
@@ -106,7 +106,7 @@ namespace Xsolla.SDK.Common
         public static XsollaUnityBridgeJsonCallback CreateCommonListener(string name, [CanBeNull] XsollaClientCallback.CallbackDelegate callback = default)
         {
             return new XsollaUnityBridgeJsonCallback(callback ?? ((result, error) => {
-                XsollaLogger.Debug(Tag, $"{name} common callback fire result={result} error={error}");
+                XsollaLogger.Debug(Tag, $"{name} common callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
             }));
         }
         

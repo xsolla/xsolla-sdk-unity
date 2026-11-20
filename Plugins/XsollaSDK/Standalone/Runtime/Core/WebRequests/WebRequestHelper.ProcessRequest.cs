@@ -111,22 +111,22 @@ namespace Xsolla.Core
 
 			if (log)
 			{
-				var logMessage = $"WebRequest: {webRequest.url}";
+				var logMessage = $"WebRequest: {LogRedaction.Redact(webRequest.url)}";
 
 				var header = webRequest.GetResponseHeader("Authorization");
 				if (!string.IsNullOrEmpty(header))
-					logMessage += $"\n\nAuthorization: {header}";
+					logMessage += $"\n\nAuthorization: {LogRedaction.Tail(header)}";
 
 				var uploadBytes = webRequest.uploadHandler?.data;
 				if (uploadBytes != null)
 				{
 					var dataJson = Encoding.UTF8.GetString(uploadBytes);
-					logMessage += $"\n\nRequest: {dataJson}";
+					logMessage += $"\n\nRequest: {LogRedaction.Redact(dataJson)}";
 				}
 
 				if (!string.IsNullOrEmpty(data))
 				{
-					logMessage += $"\n\nResponse: {data}";
+					logMessage += $"\n\nResponse: {LogRedaction.Redact(data)}";
 				}
 
 				XDebug.Log($"{logMessage}\n");

@@ -4,6 +4,7 @@ using Newtonsoft.Json;
 using System;
 using UnityEngine.Serialization;
 using UnityEngine;
+using Xsolla.SDK.Utils;
 
 namespace Xsolla.SDK.Common
 {
@@ -468,8 +469,12 @@ namespace Xsolla.SDK.Common
         string ToJson() => XsollaClientHelpers.ToJson(this);
 
         /// <summary>
-        /// Returns the JSON string representation of the settings.
+        /// Returns the JSON string representation of the settings, for the log.
         /// </summary>
-        public override string ToString() => ToJson();
+        /// <remarks>
+        /// With secret obfuscation on, it obfuscates the social provider's access token. Nothing sends this string to a
+        /// native SDK, which gets its JSON from the serializer directly.
+        /// </remarks>
+        public override string ToString() => LogObfuscation.ObfuscateJsonIfEnabled(ToJson());
     }
 }

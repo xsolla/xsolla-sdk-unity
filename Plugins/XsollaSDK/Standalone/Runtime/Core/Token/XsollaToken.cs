@@ -56,9 +56,30 @@ namespace Xsolla.Core
 			};
 
 			XDebug.Log(Settings, $"XsollaToken created (access only); IsBasedOnDeviceId: {Instance.isBasedOnDeviceId}");
-			XDebug.LogDebug(Settings, $"XsollaToken access token: {Instance.accessToken}");
+			XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(Instance.accessToken)}");
 
 			SaveInstance();
+		}
+
+		/// <summary>
+		/// Saves an access-only token that is not based on a device ID, unless it is the access token of the saved
+		/// session, which is then loaded and kept as saved.
+		/// </summary>
+		/// <remarks>
+		/// Login and the store share the saved session but each holds its own instance, so the token is compared with the
+		/// saved one, not with this instance. Saving the session's own access token as access-only would drop its refresh
+		/// token and device ID flag, and <c>ClearToken</c> would then discard a device ID session.
+		/// </remarks>
+		public void CreateOrKeepSaved(string accessToken)
+		{
+			if (TryLoadInstance() && AccessToken == accessToken)
+			{
+				XDebug.Log(Settings, $"XsollaToken kept (the saved session's access token); IsBasedOnDeviceId: {Instance.isBasedOnDeviceId}");
+			}
+			else
+			{
+				Create(accessToken, isBasedOnDeviceId: false);
+			}
 		}
 
 		public void Create(string accessToken, string refreshToken, bool isBasedOnDeviceId)
@@ -70,7 +91,7 @@ namespace Xsolla.Core
 			};
 
 			XDebug.Log(Settings, $"XsollaToken created (access and refresh); IsBasedOnDeviceId: {Instance.isBasedOnDeviceId}");
-			XDebug.LogDebug(Settings, $"XsollaToken access token: {accessToken}\nRefresh token: {refreshToken}");
+			XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(accessToken)}\nRefresh token: {LogRedaction.Tail(refreshToken)}");
 
 			SaveInstance();
 		}
@@ -88,7 +109,7 @@ namespace Xsolla.Core
 				+ $"\nExpiration time: {DateTimeOffset.FromUnixTimeSeconds(ExpirationTime).ToLocalTime()}"
 				+ $"\nIsBasedOnDeviceId: {Instance.isBasedOnDeviceId}"
 			);
-			XDebug.LogDebug(Settings, $"XsollaToken access token: {accessToken}\nRefresh token: {refreshToken}");
+			XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(accessToken)}\nRefresh token: {LogRedaction.Tail(refreshToken)}");
 
 			SaveInstance();
 		}
@@ -109,7 +130,7 @@ namespace Xsolla.Core
 				+ $"\nExpiration time: {DateTimeOffset.FromUnixTimeSeconds(ExpirationTime).ToLocalTime()}"
 				+ $"\nIsBasedOnDeviceId: {Instance.isBasedOnDeviceId}"
 			);
-			XDebug.LogDebug(Settings, $"XsollaToken access token: {accessToken}\nRefresh token: {refreshToken}");
+			XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(accessToken)}\nRefresh token: {LogRedaction.Tail(refreshToken)}");
 
 			SaveInstance();
 		}
@@ -169,17 +190,17 @@ namespace Xsolla.Core
 			}
 
 			Instance = data;
-			XDebug.LogDebug(Settings, $"XsollaToken loaded; decoded payload: {JwtUtils.DecodePayloadJson(Instance.accessToken) ?? "(not decodable)"}");
+			XDebug.LogDebug(Settings, $"XsollaToken loaded; decoded payload: {LogRedaction.Redact(JwtUtils.DecodePayloadJson(Instance.accessToken)) ?? "(not decodable)"}");
 
 			if (string.IsNullOrEmpty(RefreshToken))
 			{
 				XDebug.Log(Settings, $"XsollaToken loaded (access only); IsBasedOnDeviceId: {Instance.isBasedOnDeviceId}");
-				XDebug.LogDebug(Settings, $"XsollaToken access token: {AccessToken}");
+				XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(AccessToken)}");
 			}
 			else if (ExpirationTime <= 0)
 			{
 				XDebug.Log(Settings, $"XsollaToken loaded (access and refresh); IsBasedOnDeviceId: {Instance.isBasedOnDeviceId}");
-				XDebug.LogDebug(Settings, $"XsollaToken access token: {AccessToken}\nRefresh token: {RefreshToken}");
+				XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(AccessToken)}\nRefresh token: {LogRedaction.Tail(RefreshToken)}");
 			}
 			else
 			{
@@ -187,7 +208,7 @@ namespace Xsolla.Core
 					+ $"\nExpiration time: {DateTimeOffset.FromUnixTimeSeconds(ExpirationTime).ToLocalTime()}"
 					+ $"\nIsBasedOnDeviceId: {Instance.isBasedOnDeviceId}"
 				);
-				XDebug.LogDebug(Settings, $"XsollaToken access token: {AccessToken}\nRefresh token: {RefreshToken}");
+				XDebug.LogDebug(Settings, $"XsollaToken access token: {LogRedaction.Tail(AccessToken)}\nRefresh token: {LogRedaction.Tail(RefreshToken)}");
 			}
 
 			return true;

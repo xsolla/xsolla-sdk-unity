@@ -57,7 +57,7 @@ namespace Xsolla.SDK.Login
         private XsollaLoginClient(XsollaClientConfiguration configuration)
         {
             RunOnStartThread.Create();
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
 
             _settingsFuture = SimpleFuture.Create<XsollaClientConfiguration, string>(out var promise);
 
@@ -130,7 +130,7 @@ namespace Xsolla.SDK.Login
             Action<XsollaLoginToken, XsollaLoginClientError> completionHandler
         )
         {
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
 
             _loginImpl.Login(configuration,
                 onSuccess: token => completionHandler?.Invoke(token, null),
@@ -148,7 +148,7 @@ namespace Xsolla.SDK.Login
             Action<XsollaLoginToken, XsollaLoginClientError> completionHandler
         )
         {
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
 
             _loginImpl.LoginSilently(configuration,
                 onSuccess: token => completionHandler?.Invoke(token, null),
@@ -169,7 +169,7 @@ namespace Xsolla.SDK.Login
             Action<XsollaLoginToken, XsollaLoginClientError> completionHandler
         )
         {
-            XsollaLogger.SetLogLevel(configuration.logLevel);
+            XsollaLogger.Apply(configuration);
 
             _loginImpl.LoginWithSocialAccount(configuration, provider, token,
                 onSuccess: token => completionHandler?.Invoke(token, null),
@@ -178,8 +178,18 @@ namespace Xsolla.SDK.Login
         }
 
         /// <summary>
-        /// Clears any locally saved authentication tokens using the default configuration.
+        /// Signs the user out of the saved session using the default configuration.
         /// </summary>
+        /// <remarks>
+        /// On Android, it signs the user out of the Xsolla Login widget session and revokes its refresh token.
+        /// A device ID or social session is kept: the native SDK cannot sign those out, and a device ID sign-in
+        /// returns the same user anyway.
+        /// On Win/Mac/WebGL, it discards the saved session and revokes its refresh token. A device ID session is kept:
+        /// the store's purchases run on it, and a device ID sign-in returns the same user anyway.
+        /// On both, a failed server revoke only logs a warning, and the user stays signed out.
+        /// A store initialized with the session's access token keeps that token until you deinitialize the store
+        /// or pass the next user's token to <c>UpdateAccessToken</c>.
+        /// </remarks>
         /// <param name="completionHandler">Callback invoked when complete or on error.</param>
         public void ClearToken(Action<XsollaLoginClientError> completionHandler) =>
             _settingsFuture.OnComplete(
@@ -188,8 +198,11 @@ namespace Xsolla.SDK.Login
             );
 
         /// <summary>
-        /// Clears any locally saved authentication tokens using the specified configuration.
+        /// Signs the user out of the saved session using the specified configuration.
         /// </summary>
+        /// <remarks>
+        /// Same as <see cref="ClearToken(Action{XsollaLoginClientError})"/>, which says what each platform signs out of and which sessions it keeps.
+        /// </remarks>
         /// <param name="configuration">The client configuration.</param>
         /// <param name="completionHandler">Callback invoked when complete or on error.</param>
         public void ClearToken(

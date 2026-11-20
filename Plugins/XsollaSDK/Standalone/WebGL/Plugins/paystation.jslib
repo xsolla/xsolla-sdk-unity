@@ -1,5 +1,7 @@
 mergeInto(LibraryManager.library, {
 
+	OpenPayStationWidget__deps: ['ClosePayStationWidget'],
+
 	OpenPayStationWidget: function (token, sandbox, sdkType, engineVersion, sdkVersion, applePayMerchantDomain, appearanceJson, externalBrowser, externalUrl) {
 		var jsToken = UTF8ToString(token);
 		var isSandbox = sandbox > 0 ? true : false;
@@ -85,12 +87,11 @@ mergeInto(LibraryManager.library, {
             options.queryParams.parent_domain = jsParentDomain;
         }
 
-		var s = document.createElement('script');
-		s.type = "text/javascript";
-		s.async = true;
-		s.src = "https://cdn.xsolla.net/payments-bucket-prod/embed/1.5.0/widget.min.js";
+		var openWidget = function () {
+			// Listeners an earlier open left, if it was never closed through ClosePayStationWidget, would answer
+			// this purchase twice.
+			XPayStationWidget.off();
 
-		s.addEventListener('load', function (e) {
 			XPayStationWidget.on(XPayStationWidget.eventTypes.STATUS, function (event, data) {
 				Module.SendMessage('XsollaWebCallbacks', 'PublishPaymentStatusUpdate');
 
@@ -100,15 +101,7 @@ mergeInto(LibraryManager.library, {
                 }
 
                 if (status === 'done') {
-                    if (typeof XPayStationWidget !== 'undefined') {
-                        XPayStationWidget.off();
-                    }
-
-                    var elements = document.getElementsByClassName('xpaystation-widget-lightbox');
-                    for (var i = 0; i < elements.length; i++) {
-                        elements[i].style.display = 'none';
-                        elements[i].remove();
-                    }
+                    _ClosePayStationWidget();
                 }
 
             });
@@ -124,22 +117,69 @@ mergeInto(LibraryManager.library, {
 
 			XPayStationWidget.init(options);
 			XPayStationWidget.open();
-		}, false);
+		};
 
-		var head = document.getElementsByTagName('head')[0];
-		head.appendChild(s);
+		// The widget script is loaded once per page. While it loads, only the latest purchase waits to open, as the
+		// SDK answers only the latest one.
+		var scriptId = 'xsolla-paystation-widget-script';
+		var script = document.getElementById(scriptId);
+
+		if (typeof XPayStationWidget !== 'undefined') {
+			openWidget();
+		}
+		else if (script) {
+			script.xsollaOpenWidget = openWidget;
+		}
+		else {
+			script = document.createElement('script');
+			script.id = scriptId;
+			script.type = "text/javascript";
+			script.async = true;
+			script.src = "https://cdn.xsolla.net/payments-bucket-prod/embed/1.5.0/widget.min.js";
+			script.xsollaOpenWidget = openWidget;
+
+			script.addEventListener('load', function () {
+				script.xsollaOpenWidget();
+			}, false);
+
+			// Without the script nothing opens, so the next purchase loads it again.
+			script.addEventListener('error', function () {
+				if (script.parentNode) {
+					script.parentNode.removeChild(script);
+				}
+			}, false);
+
+			document.getElementsByTagName('head')[0].appendChild(script);
+		}
 	},
 
 	ClosePayStationWidget: function () {
-		if (typeof XPayStationWidget !== undefined) {
+		if (typeof XPayStationWidget !== 'undefined') {
 			XPayStationWidget.off();
 		}
 
-		var elements = document.getElementsByClassName('xpaystation-widget-lightbox');
-		for (var i = 0; i < elements.length; i++) {
-			elements[i].style.display = 'none';
-			elements[i].remove();
-		}
+		// A close by the user runs this from the widget's own close event, before the widget removes its lightbox:
+		// removing it here first made that removal throw and left the page unscrollable. By a later tick that close
+		// has removed the lightbox. One still attached means the SDK closes the widget (after a payment, whichever
+		// of the status listener or the order check sees it first), so it closes through the widget: only the
+		// widget's own close listener restores the page's scrolling and unsubscribes itself, and with the SDK's
+		// listeners already off it reports no cancel. A tick after that removes what a modal widget, which ignores
+		// close, leaves.
+		var removeLeftovers = function () {
+			var elements = Array.prototype.slice.call(document.getElementsByClassName('xpaystation-widget-lightbox'));
+			for (var i = 0; i < elements.length; i++) {
+				if (elements[i].parentNode) {
+					elements[i].parentNode.removeChild(elements[i]);
+				}
+			}
+		};
+
+		setTimeout(function () {
+			if (document.getElementsByClassName('xpaystation-widget-lightbox').length > 0 && typeof XPayStationWidget !== 'undefined') {
+				XPayStationWidget.close();
+				setTimeout(removeLeftovers, 0);
+			}
+		}, 0);
 	},
 	
 	ShowPopupAndOpenPayStation: function (url, popupMessage, continueButtonText, cancelButtonText) {

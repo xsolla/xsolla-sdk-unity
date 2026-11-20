@@ -46,6 +46,9 @@ namespace Xsolla.SDK.Common
             var nativeLocale = configuration.GetCurrentLocale()?.nativeCode;
             if (!string.IsNullOrEmpty(nativeLocale))
                 json["locale"] = nativeLocale;
+            // Absent means off to the Android bridge, and the iOS bridge warns about every key it doesn't know yet.
+            if (!configuration.secretsObfuscated)
+                json.Remove(nameof(XsollaClientConfiguration.secretsObfuscated));
             return json.ToString(Formatting.None);
         }
     }

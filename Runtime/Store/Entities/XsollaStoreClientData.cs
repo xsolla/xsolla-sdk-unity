@@ -233,8 +233,13 @@ namespace Xsolla.SDK.Store
         public string receipt;
         /// <summary>Number of units this purchase covers. Zero when the platform reports none.</summary>
         public int quantity;
-        /// <summary>When the player paid, in Unix milliseconds. Zero when the platform reports none.</summary>
+        /// <summary>When the user paid, in Unix milliseconds. Zero when the platform reports none.</summary>
         public long purchaseTimeMillis;
+        /// <summary>
+        /// Where the purchase came from, as the Android SDK names it (<c>live</c>, <c>eventsRestore</c> or
+        /// <c>inventoryRestore</c>). Null when the platform reports none.
+        /// </summary>
+        public string origin;
     }
 
     /// <summary>
@@ -264,6 +269,29 @@ namespace Xsolla.SDK.Store
             Free = 7,
         }
 
+        /// <summary>
+        /// Where a purchase came from: a payment that surfaced for the first time, or a restore replaying something
+        /// bought earlier.
+        /// </summary>
+        public enum Origin
+        {
+            /// <summary>The platform did not report where the purchase came from. iOS always reports this.</summary>
+            Unknown = 0,
+            /// <summary>
+            /// A purchase surfacing for the first time: a payment completed in this session, or a grant delivered while
+            /// the app runs.
+            /// </summary>
+            Live = 1,
+            /// <summary>An earlier payment replayed from the Xsolla Events API, under its real transaction id.</summary>
+            EventsRestore = 2,
+            /// <summary>
+            /// An item held in the Xsolla inventory, restored as a purchase. The inventory records no transactions, so
+            /// its ids are made up per position in the SKU's quantity, not per unit, and change between sessions: grant a
+            /// non-consumable once per SKU, never per transaction id.
+            /// </summary>
+            InventoryRestore = 3,
+        }
+
         /// <summary>Product SKU.</summary>
         public string sku;
         /// <summary>Order ID. A 64-bit value: Xsolla order ids are stored as bigint and are past a third of the 32-bit range.</summary>
@@ -277,7 +305,7 @@ namespace Xsolla.SDK.Store
         /// <summary>Quantity purchased.</summary>
         public int quantity;
         /// <summary>
-        /// When the player paid, in Unix milliseconds, or zero when the platform reports no time. A restored
+        /// When the user paid, in Unix milliseconds, or zero when the platform reports no time. A restored
         /// purchase reports the original payment where the backend records one; it is never the time the
         /// purchase was read back.
         /// </summary>
@@ -286,6 +314,31 @@ namespace Xsolla.SDK.Store
         public Status status;
         /// <summary>Developer payload.</summary>
         public string developerPayload;
+        /// <summary>
+        /// Where the purchase came from, or <see cref="Origin.Unknown"/> when the platform does not report it.
+        /// <para/>
+        /// A restore can deliver a non-consumable the user already owns, under a different id than the one it was bought
+        /// under, as it does after a reinstall, on another device or after the app's data was cleared. Grant it once per
+        /// SKU, never per transaction id. A consumable is restored until it is consumed: grant it, then consume it.
+        /// <para/>
+        /// The ids of an <see cref="Origin.InventoryRestore"/> stand for positions in the SKU's quantity rather than units,
+        /// and change between sessions. An <see cref="Origin.EventsRestore"/> carries the purchase's real transaction id.
+        /// <para/>
+        /// On iOS the store client derives it from how and with which id the purchase arrived, until the iOS SDK reports
+        /// it. A purchase answering <c>PurchaseProduct</c> is <see cref="Origin.Live"/>. Of the others, outside the Events
+        /// API one with an order id is <see cref="Origin.Unknown"/>, and under it one with no order id is
+        /// <see cref="Origin.Unknown"/> while <c>localPurchasesRestore</c> is on.
+        /// </summary>
+        public Origin origin;
+
+        /// <summary>
+        /// Whether the purchase carries no identity of its own: a restored unit whose transaction id the store client
+        /// made up, so no dedup can tell that two restores reported the same unit.
+        /// <para/>
+        /// Set for the units the Android inventory restore reports under made-up ids (see
+        /// <see cref="XsollaRestoredTransactionIdsAndroid"/>), whose receipt alone would read as an identity.
+        /// </summary>
+        internal bool identityless;
 
         /// <summary>
         /// Builder for <see cref="XsollaStoreClientPurchasedProduct"/>.
@@ -324,7 +377,7 @@ namespace Xsolla.SDK.Store
             public Builder SetQuantity(int quantity) { _product.quantity = quantity; return this; }
 
             /// <summary>
-            /// Sets when the player paid, in Unix milliseconds.
+            /// Sets when the user paid, in Unix milliseconds.
             /// </summary>
             /// <param name="purchaseTimeMillis">Payment time in Unix milliseconds, or zero if unknown.</param>
             public Builder SetPurchaseTimeMillis(long purchaseTimeMillis) { _product.purchaseTimeMillis = purchaseTimeMillis; return this; }
@@ -373,6 +426,35 @@ namespace Xsolla.SDK.Store
             public Builder SetDeveloperPayload(string developerPayload) { _product.developerPayload = developerPayload; return this; }
 
             /// <summary>
+            /// Sets where the purchase came from.
+            /// </summary>
+            /// <param name="origin">Purchase origin.</param>
+            public Builder SetOrigin(Origin origin) { _product.origin = origin; return this; }
+
+            /// <summary>
+            /// Sets where the purchase came from, by the name the Android SDK gives it. A missing or unrecognized name sets
+            /// <see cref="Origin.Unknown"/>.
+            /// </summary>
+            /// <param name="origin">Origin name: <c>live</c>, <c>eventsRestore</c> or <c>inventoryRestore</c>.</param>
+            public Builder SetOrigin(string origin)
+            {
+                switch (origin)
+                {
+                    case "live": _product.origin = Origin.Live; break;
+                    case "eventsRestore": _product.origin = Origin.EventsRestore; break;
+                    case "inventoryRestore": _product.origin = Origin.InventoryRestore; break;
+                    default: _product.origin = Origin.Unknown; break;
+                }
+                return this;
+            }
+
+            /// <summary>
+            /// Sets whether the purchase carries no identity of its own.
+            /// </summary>
+            /// <param name="identityless">Whether the transaction id is made up by the store client.</param>
+            internal Builder SetIdentityless(bool identityless) { _product.identityless = identityless; return this; }
+
+            /// <summary>
             /// Populates builder from purchased product data.
             /// </summary>
             /// <param name="data">Purchased product data.</param>
@@ -389,6 +471,7 @@ namespace Xsolla.SDK.Store
                 _product.quantity = data.quantity > 0 ? data.quantity : 1;
                 _product.purchaseTimeMillis = data.purchaseTimeMillis > 0 ? data.purchaseTimeMillis : 0;
                 SetStatus(data.status);
+                SetOrigin(data.origin);
                 return this;
             }
 
@@ -411,6 +494,7 @@ namespace Xsolla.SDK.Store
                 .SetInvoiceId(invoiceId)
                 .SetReceipt(receipt)
                 .SetOrderStatus(status)
+                .SetOrigin(origin)
                 .SetDeveloperPayload(developerPayload)
                 .SetQuantity(quantity)
                 .SetPurchaseTimeMillis(purchaseTimeMillis)
@@ -535,12 +619,42 @@ namespace Xsolla.SDK.Store
         public string developerPayload;
         /// <summary>Number of units this purchase covers.</summary>
         public int quantity;
-        /// <summary>When the player paid, in Unix milliseconds, or zero when no time is reported.</summary>
+        /// <summary>When the user paid, in Unix milliseconds, or zero when no time is reported.</summary>
         public long purchaseTimeMillis;
 
         /// <summary>Order status.</summary>
         [JsonConverter(typeof(StringEnumConverter))]
         public XsollaStoreClientPurchasedProduct.Status orderStatus = XsollaStoreClientPurchasedProduct.Status.Unknown;
+
+        /// <summary>
+        /// Where the purchase came from; see <see cref="XsollaStoreClientPurchasedProduct.origin"/>.
+        /// </summary>
+        [JsonConverter(typeof(LenientOriginConverter))]
+        public XsollaStoreClientPurchasedProduct.Origin origin = XsollaStoreClientPurchasedProduct.Origin.Unknown;
+
+        /// <summary>
+        /// Reads an origin by name, and one this version does not define, such as a value a later SDK version wrote,
+        /// as <see cref="XsollaStoreClientPurchasedProduct.Origin.Unknown"/> instead of failing the whole receipt.
+        /// </summary>
+        private sealed class LenientOriginConverter : StringEnumConverter
+        {
+            public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+            {
+                object origin;
+                try
+                {
+                    origin = base.ReadJson(reader, objectType, existingValue, serializer);
+                }
+                catch (JsonSerializationException)
+                {
+                    origin = null;
+                }
+
+                return origin != null && Enum.IsDefined(typeof(XsollaStoreClientPurchasedProduct.Origin), origin)
+                    ? origin
+                    : XsollaStoreClientPurchasedProduct.Origin.Unknown;
+            }
+        }
 
         /// <summary>
         /// Builder for <see cref="XsollaStoreClientPurchaseReceipt"/>.
@@ -591,13 +705,19 @@ namespace Xsolla.SDK.Store
             public Builder SetOrderStatus(XsollaStoreClientPurchasedProduct.Status orderStatus) { _purchaseReceipt.orderStatus = orderStatus; return this; }
 
             /// <summary>
+            /// Sets where the purchase came from.
+            /// </summary>
+            /// <param name="origin">Purchase origin.</param>
+            public Builder SetOrigin(XsollaStoreClientPurchasedProduct.Origin origin) { _purchaseReceipt.origin = origin; return this; }
+
+            /// <summary>
             /// Sets the number of units the purchase covers.
             /// </summary>
             /// <param name="quantity">Quantity purchased.</param>
             public Builder SetQuantity(int quantity) { _purchaseReceipt.quantity = quantity; return this; }
 
             /// <summary>
-            /// Sets when the player paid, in Unix milliseconds.
+            /// Sets when the user paid, in Unix milliseconds.
             /// </summary>
             /// <param name="purchaseTimeMillis">Payment time in Unix milliseconds, or zero if unknown.</param>
             public Builder SetPurchaseTimeMillis(long purchaseTimeMillis) { _purchaseReceipt.purchaseTimeMillis = purchaseTimeMillis; return this; }

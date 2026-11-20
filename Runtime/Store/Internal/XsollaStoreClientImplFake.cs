@@ -19,7 +19,7 @@ namespace Xsolla.SDK.Store
             PurchaseProductResultFunc onSuccessPurchaseProduct, ErrorFunc onErrorPurchase
         ) {
             XsollaLogger.Debug(Tag, $"Initialize {configuration}");
-            XsollaLogger.Debug(Tag, $"Initialize JSON: {XsollaClientHelpers.ConfigurationToJson(configuration)}");
+            XsollaLogger.Debug(Tag, $"Initialize JSON: {LogObfuscation.ObfuscateJsonIfEnabled(XsollaClientHelpers.ConfigurationToJson(configuration))}");
 
             _configuration = configuration;
             
@@ -64,7 +64,7 @@ namespace Xsolla.SDK.Store
                 args.allowTokenOnlyFinishedStatusWithoutOrderId, args.externalTransactionToken
             );
 
-            XsollaLogger.Debug(Tag, $"Purchase {sku} - {purchaseJson}");
+            XsollaLogger.Debug(Tag, $"Purchase {sku} - {LogObfuscation.ObfuscateJsonIfEnabled(purchaseJson)}");
 
             // Mirrors the native Android gate: an external transaction token only rides the product
             // based billing flow, so accepting it in every flow would let a fake pass what a device fails.

@@ -4,6 +4,7 @@ using System;
 using UnityEngine;
 using UnityEngine.Purchasing;
 using Xsolla.SDK.Common;
+using Xsolla.SDK.Store;
 
 namespace Xsolla.SDK.UnityPurchasing
 {
@@ -30,6 +31,7 @@ namespace Xsolla.SDK.UnityPurchasing
         public readonly string transactionId;
         public readonly string receipt;
         public readonly OrderStatus orderStatus;
+        public readonly XsollaStoreClientPurchasedProduct.Origin origin;
 
         internal PurchaseEventPayload(
             [NotNull] PurchaseEventArgsExtensions.DeserializedPayload deserializedPayload
@@ -44,11 +46,16 @@ namespace Xsolla.SDK.UnityPurchasing
             this.orderStatus = Enum.TryParse<OrderStatus>(deserializedPayload.orderStatus, ignoreCase: true, out var orderStatus)
                 ? orderStatus
                 : OrderStatus.Unknown;
+
+            this.origin = Enum.TryParse<XsollaStoreClientPurchasedProduct.Origin>(deserializedPayload.origin, ignoreCase: true, out var origin)
+                && Enum.IsDefined(typeof(XsollaStoreClientPurchasedProduct.Origin), origin)
+                ? origin
+                : XsollaStoreClientPurchasedProduct.Origin.Unknown;
         }
 
         public override string ToString() =>
             $"Payload [productId='{productId}', orderId={orderId}, invoiceId='{invoiceId}', " +
-            $"transactionId='{transactionId}', receipt='{receipt}', orderStatus={orderStatus}]";
+            $"transactionId='{transactionId}', receipt='{receipt}', orderStatus={orderStatus}, origin={origin}]";
     }
 
     internal static class PurchaseEventArgsExtensions
@@ -62,12 +69,13 @@ namespace Xsolla.SDK.UnityPurchasing
             public string transactionId;
             public string receipt;
             public string orderStatus;
+            public string origin;
 
             public DeserializedPayload() {}
 
             public DeserializedPayload(
                 string productId, long orderId, string invoiceId, string transactionId,
-                string receipt, string orderStatus
+                string receipt, string orderStatus, string origin
             )
             {
                 this.productId = productId;
@@ -76,6 +84,7 @@ namespace Xsolla.SDK.UnityPurchasing
                 this.transactionId = transactionId;
                 this.receipt = receipt;
                 this.orderStatus = orderStatus.ToLower();
+                this.origin = origin;
             }
         }
 

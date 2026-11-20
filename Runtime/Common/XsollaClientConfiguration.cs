@@ -49,6 +49,10 @@ namespace Xsolla.SDK.Common
         [JsonConverter(typeof(StringEnumConverter))]
         public XsollaLogLevel logLevel = XsollaLogLevel.None;
 
+        /// <summary>Whether SDK logs obfuscate tokens and OAuth secrets, keeping only enough to tell two apart.</summary>
+        /// <remarks>Off by default; on by default from 3.2.0. Applies to the whole app, like <see cref="logLevel"/>.</remarks>
+        public bool secretsObfuscated = false;
+
         /// <summary>Task for delayed configuration.</summary>
         [NonSerialized]
         public Task<OnDelayedConfiguration> delayedTask = null;
@@ -164,6 +168,12 @@ namespace Xsolla.SDK.Common
             /// </summary>
             /// <param name="logLevel">The log level for the SDK.</param>
             public Builder SetLogLevel(XsollaLogLevel logLevel) { _configuration.logLevel = logLevel; return this; }
+
+            /// <summary>
+            /// Sets whether SDK logs obfuscate tokens and OAuth secrets.
+            /// </summary>
+            /// <param name="secretsObfuscated">True to obfuscate them in every build.</param>
+            public Builder SetSecretsObfuscated(bool secretsObfuscated) { _configuration.secretsObfuscated = secretsObfuscated; return this; }
 
             /// <summary>
             /// Sets the delayed configuration task.
@@ -328,9 +338,14 @@ namespace Xsolla.SDK.Common
         string ToJson() => XsollaClientHelpers.ToJson(this);
 
         /// <summary>
-        /// Returns the JSON string representation of the configuration.
+        /// Returns the JSON string representation of the configuration, for the log.
         /// </summary>
-        public override string ToString() => ToJson();
+        /// <remarks>
+        /// With <see cref="secretsObfuscated"/> on, it obfuscates every token in it: the access token and the social
+        /// provider's. Nothing sends this string to a native SDK, which gets its JSON from
+        /// <see cref="XsollaClientHelpers.ConfigurationToJson"/>.
+        /// </remarks>
+        public override string ToString() => LogObfuscation.ObfuscateJsonIfEnabled(ToJson());
     }
 
     /// <summary>

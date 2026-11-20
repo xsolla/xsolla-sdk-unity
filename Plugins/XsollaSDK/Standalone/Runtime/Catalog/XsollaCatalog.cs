@@ -399,6 +399,29 @@ namespace Xsolla.Catalog
 		}
 
 		/// <summary>
+		/// Returns the culture of the geo the catalog reports, or <c>null</c> when the runtime has no culture for it.
+		/// <para/>
+		/// The country can be a code no culture carries, such as <c>T1</c> (Tor) or <c>A1</c> (anonymous proxy); the fetch
+		/// then answers as it does without a geo, priced in the configured locale, instead of never answering.
+		/// </summary>
+		internal static CultureInfo FindGeoCulture(XsollaSettings settings, string languageCode, string countryCode)
+		{
+			var code = $"{languageCode.ToLowerInvariant()}-{countryCode.ToUpperInvariant()}";
+
+			try
+			{
+				var culture = new CultureInfo(code);
+				XDebug.Log(settings, $"[Catalog] geo detected culture: {code}");
+				return culture;
+			}
+			catch (Exception ex)
+			{
+				XDebug.LogWarning(settings, $"[Catalog] geo culture {code} is unknown to the runtime, prices keep the configured locale: {ex.Message}");
+				return null;
+			}
+		}
+
+		/// <summary>
 		/// Returns a list of virtual items according to pagination settings.
 		/// The list includes items for which display in the store is enabled in the settings. For each virtual item, complete data is returned.
 		/// If called after user authentication, the method returns items that match the personalization rules for the current user.
@@ -453,26 +476,14 @@ namespace Xsolla.Catalog
 		                responseHeaders.TryGetValue("X-User-Country-Code", out var countryCode) &&
 		                !string.IsNullOrEmpty(countryCode))
 		            {
-		                try
+		                var updatedStoreItems = new StoreItems
 		                {
-		                    var code = $"{languageCode.ToLowerInvariant()}-{countryCode.ToUpperInvariant()}";
+		                    items = storeItems.items,
+		                    has_more = storeItems.has_more,
+		                    geoLocale = FindGeoCulture(settings, languageCode, countryCode)
+		                };
 
-		                    var culture = new CultureInfo(code);
-
-		                    XDebug.Log(settings, $"[Catalog] geo detected culture: {code}");
-
-		                    var updatedStoreItems = new StoreItems
-		                    {
-		                        items = storeItems.items,
-		                        has_more = storeItems.has_more,
-		                        geoLocale = culture
-		                    };
-
-		                    onSuccess(updatedStoreItems);
-		                }
-		                catch(Exception ex) {
-		                    XDebug.LogError(settings, ex.ToString());
-		                }
+		                onSuccess(updatedStoreItems);
 		            }
 		            else
 		            {
@@ -1312,12 +1323,12 @@ namespace Xsolla.Catalog
 								}
 								else
 								{
-									onError.Invoke(new Error(errorMessage: $"Wrong post payment order status, expected 'done' (payment_token={paymentToken})"));
+									onError.Invoke(new Error(errorMessage: $"Wrong post payment order status, expected 'done' (payment_token={LogRedaction.Tail(paymentToken)})"));
 								}
 							},
 							onFailure: err =>
 							{
-								onError.Invoke(new Error(errorMessage: $"Post payment order status query failed (payment_token={paymentToken}):\n{err}"));
+								onError.Invoke(new Error(errorMessage: $"Post payment order status query failed (payment_token={LogRedaction.Tail(paymentToken)}):\n{err}"));
 							}
 						);
 					else

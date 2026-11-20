@@ -60,7 +60,7 @@ namespace Xsolla.SDK.UnityPurchasing
         /// </summary>
         public override void Configure()
         {
-            XsollaLogger.SetLogLevel(_configuration.logLevel);
+            XsollaLogger.Apply(_configuration);
 
             var store = new XsollaPurchasingStore(_configuration);
 

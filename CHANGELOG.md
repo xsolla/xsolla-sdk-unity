@@ -1,3 +1,40 @@
+## [3.1.24] - 2026-11-20
+
+### Added
+
+- Win/Mac/WebGL/Android: `XsollaClientConfiguration.secretsObfuscated` and `Builder.SetSecretsObfuscated(bool)` to obfuscate tokens, purchase receipts and other secrets in SDK logs (off by default; on by default from 3.2.0)
+- Win/Mac/WebGL/Android/iOS: `XsollaStoreClientPurchasedProduct.origin` tells a live purchase from one restored through the Events API or the inventory (also in the Unity IAP receipt)
+
+### Changed
+
+- Android: updated SDK to `3.1.4` (sign-in runs on the SDK's own login code instead of the Xsolla Login SDK, which is no longer a dependency; users stay signed in across the upgrade; device ID sign-in restores its saved session; the widget opens in any Custom Tabs browser and fails after 15 minutes without a redirect; silent sign-in renews an expired session, so it can now fail offline; purchases, consumes, validation and queries renew a rejected session and retry once; a consume is no longer resent after a server error once sent; the first payment web view of a session no longer stays blank; a saved sign-in that Android backup restores onto a new install is discarded)
+- Android: the native SDK, sign-in included, now follows `logLevel` and `secretsObfuscated` (`Warning` now also shows its warnings)
+- iOS: with `secretsObfuscated` on, the iOS SDK's warnings and errors in the Unity log obfuscate their token values
+- Win/Mac/WebGL: OAuth 2.0 sign-in with a social access token or device ID now uses PKCE, and every OAuth 2.0 sign-in sends a random `state` instead of `xsollatest`
+- Win/Mac: Xsolla Login widget sign-in refuses a redirect whose `state` differs from the one it sent
+- Win/Mac/WebGL: `ClearToken` now keeps a device ID session and revokes any other session's refresh token on the server (a failed server revoke only logs a warning)
+
+### Fixed
+
+- Android: the browser-provider configuration warning and the store's sign-in setup lines (`Authenticating using ...`) now follow `logLevel` instead of logging even at `None`
+- Android: `ClearToken` now signs the user out of the Xsolla Login widget session, keeping a device ID session, and revokes its refresh token (a failed server revoke only logs a warning, and a store keeps the old access token until you deinitialize it or call `UpdateAccessToken`)
+- Android: `XsollaLoginClient.LoginWithSocialAccount` now returns the access token, refresh token and expiry instead of the bridge's raw JSON as the access token
+- Win/Mac: Xsolla Login widget sign-in now reports an error redirect (e.g. a cancelled social sign-in) through its error callback instead of never answering
+- Win/Mac/WebGL: a store with a redirect URL set no longer fails with `010-023` when it renews a sign-in made with a social access token
+- Win/Mac/WebGL: the login client's `Debug` and `Warning` log levels now also show the SDK's network and sign-in messages, as the store client's do
+- Win/Mac: starting a new Xsolla Login widget sign-in cancels one still waiting (its `onCancel` fires), so an abandoned sign-in no longer answers for the next one
+- Android: a purchase that arrives with no purchase request waiting for it can now be consumed (its consume failed as an unknown purchase, so the next restore granted the item again)
+- Win/Mac/WebGL: a consume with the Events API now answers once (it answered twice when the purchase event had a sub-event)
+- Win/Mac/WebGL: a product fetch with `fetchProductsWithGeoLocale` no longer hangs when the runtime has no culture for the user's geo (prices then use the configured locale)
+- Win/Mac/WebGL: an Events API request refreshes a rejected token at most once (a token the Events API kept rejecting was refreshed without limit)
+- Android: units restored from the inventory now get per-session transaction ids instead of reusing one, so Unity IAP 4.x no longer consumes a unit without granting it (their receipts now carry order id `0`)
+- Android: consuming part of a restored purchase now consumes only the units asked for (it consumed the whole purchase)
+- Android: a consume whose outcome is unknown is now checked against the user's inventory instead of being left to a retry that could consume another owned unit (one it cannot settle is refused until the next launch)
+- WebGL: the Pay Station widget no longer throws a browser error when it closes, which left the page unscrollable
+- WebGL: a purchase reuses the Pay Station widget script the page already loaded instead of adding it to the page again
+- Android: a non-consumable bought through Unity IAP 4.x is no longer granted again on the next launch (its restores now carry the purchase's transaction id)
+- Win/Mac/WebGL: a store given the saved session's own access token, through `UpdateAccessToken` or its configuration, now keeps that session (it dropped the session's refresh token, so `ClearToken` then discarded a device ID session)
+
 ## [3.1.23] - 2026-11-04
 
 ### Changed

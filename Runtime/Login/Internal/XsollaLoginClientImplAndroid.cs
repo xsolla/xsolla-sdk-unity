@@ -19,7 +19,7 @@ namespace Xsolla.SDK.Login
             XsollaLogger.Debug(Tag, $"[{nameof(LoginWithSocialAccount)}]:\n" +
                 $"\tConfiguration: {configuration}\n" +
                 $"\tProvider: {provider}\n" +
-                $"\tAccountToken: {accountToken}\n"
+                $"\tAccountToken: {LogObfuscation.ObfuscateIfEnabled(accountToken)}\n"
             );
 
             RunOnStartThread.Create();
@@ -32,8 +32,8 @@ namespace Xsolla.SDK.Login
                 accountToken,
                 XsollaClientBridgeHelpersAndroid.CreateCallback( $"{nameof(LoginWithSocialAccount)}",
                     onSuccess: token => {
-                        XsollaLogger.Debug(Tag, $"{nameof(LoginWithSocialAccount)} (token={token})");
-                        onSuccess?.Invoke(new XsollaLoginToken(token));
+                        XsollaLogger.Debug(Tag, $"{nameof(LoginWithSocialAccount)} (token={LogObfuscation.ObfuscateJsonIfEnabled(token)})");
+                        onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(token));
                     },
                     onError: error => onError?.Invoke(error)
                 )
@@ -54,7 +54,7 @@ namespace Xsolla.SDK.Login
                 XsollaClientHelpers.ConfigurationToJson(configuration),
                 XsollaClientBridgeHelpersAndroid.CreateCallback( "ClearToken",
                     onSuccess: result => {
-                        XsollaLogger.Debug(Tag, $"Cleared token (result={result})");
+                        XsollaLogger.Debug(Tag, $"Cleared token (result={LogObfuscation.ObfuscateJsonIfEnabled(result)})");
                         onSuccess?.Invoke();
                     },
                     onError: error => onError?.Invoke(error)
@@ -76,7 +76,7 @@ namespace Xsolla.SDK.Login
                 XsollaClientHelpers.ToJson(token),
                 XsollaClientBridgeHelpersAndroid.CreateCallback( "RefreshToken",
                     onSuccess: result => {
-                        XsollaLogger.Debug(Tag, $"Refreshed token (result={result})");
+                        XsollaLogger.Debug(Tag, $"Refreshed token (result={LogObfuscation.ObfuscateJsonIfEnabled(result)})");
                         onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(result));
                     },
                     onError: error => onError?.Invoke(error)

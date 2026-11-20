@@ -27,13 +27,13 @@ namespace Xsolla.Core
 				return;
 			}
 			
-			XDebug.Log($"Purchase url: {url}");
+			XDebug.Log($"Purchase url: {LogRedaction.Redact(url)}");
 			Open_(url, forcePlatformBrowser);
 		}
 		
 		public static void OpenWebshop(string url, bool forcePlatformBrowser = false)
 		{
-			XDebug.Log($"Webshop purchase url: {url}");
+			XDebug.Log($"Webshop purchase url: {LogRedaction.Redact(url)}");
 
 			EventManagerProvider.Handler?.BroadcastEvent(EventTypes.PaystationOpen);
 			

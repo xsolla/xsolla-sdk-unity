@@ -21,6 +21,11 @@ namespace Xsolla.SDK.Store
         
         [CanBeNull] private XsollaClientCallback m_PaymentListener;
 
+        /// <summary>
+        /// Tells where each delivered purchase came from, under the settings of the last <see cref="Initialize"/>.
+        /// </summary>
+        [CanBeNull] private XsollaPurchaseOriginsIOS m_PurchaseOrigins;
+
         public static event Action<string, object> onNativePaymentEvent;
         
         [Serializable]
@@ -76,7 +81,8 @@ namespace Xsolla.SDK.Store
 
         /// <summary>
         /// Puts a line the iOS SDK logged into the Unity log, where a developer without Xcode
-        /// attached can read it. Only warnings and errors are forwarded.
+        /// attached can read it. Only warnings and errors are forwarded. With secrets obfuscation on, the values of
+        /// token and secret JSON keys in the line are obfuscated, as on Android; a secret outside JSON is not.
         /// </summary>
         [MonoPInvokeCallback(typeof(XsollaUnityBridgeLogCallbackDelegate))]
         private static void OnNativeLog(string level, string message)
@@ -84,10 +90,11 @@ namespace Xsolla.SDK.Store
             if (string.IsNullOrEmpty(message))
                 return;
 
+            var obfuscatedMessage = LogObfuscation.ObfuscateJsonIfEnabled(message);
             if (string.Equals(level, nameof(XsollaLogLevel.Error), StringComparison.OrdinalIgnoreCase))
-                XsollaLogger.Error(NativeTag, message);
+                XsollaLogger.Error(NativeTag, obfuscatedMessage);
             else
-                XsollaLogger.Warning(NativeTag, message);
+                XsollaLogger.Warning(NativeTag, obfuscatedMessage);
         }
 
         #endregion
@@ -127,17 +134,22 @@ namespace Xsolla.SDK.Store
             XsollaLogger.Debug(Tag, $"Initialize: {configuration}");
             
             RunOnStartThread.Create();
+
+            var purchaseOrigins = new XsollaPurchaseOriginsIOS(configuration.settings.webhooksMode, configuration.settings.localPurchasesRestore);
+            m_PurchaseOrigins = purchaseOrigins;
             
             m_PaymentListener = XsollaClientBridgeHelpersIOS.CreateCommonListener("Payment Listener",(result, error) => {
-                XsollaLogger.Debug(Tag, $"Payment Listener: common callback fire result={result} error={error}");
+                XsollaLogger.Debug(Tag, $"Payment Listener: common callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
 
                 if (onSuccessPurchaseProduct != null || onErrorPurchase != null)
                 {
                     RunOnStartThread.Run(() => {
                         if (result != null)
                         {
-                            XsollaLogger.Debug(Tag, $"Payment Listener: result={result}");
-                            onSuccessPurchaseProduct?.Invoke(XsollaStoreClientHelpers.JsonToPurchase(result, null));
+                            XsollaLogger.Debug(Tag, $"Payment Listener: result={LogObfuscation.ObfuscateJsonIfEnabled(result)}");
+                            var product = XsollaStoreClientHelpers.JsonToPurchase(result, null);
+                            product.origin = purchaseOrigins.OfListenerPurchase(result);
+                            onSuccessPurchaseProduct?.Invoke(product);
                         }
                         else
                         {
@@ -186,7 +198,7 @@ namespace Xsolla.SDK.Store
                 var nativePaymentEvent = NativePaymentEvent.FromJson(result);
                 if (nativePaymentEvent == null)
                 {
-                    XsollaLogger.Warning(TAG, $"Failed to parse native payment event: {result}");
+                    XsollaLogger.Warning(TAG, $"Failed to parse native payment event: {LogObfuscation.ObfuscateJsonIfEnabled(result)}");
                     return;
                 }
 
@@ -201,13 +213,13 @@ namespace Xsolla.SDK.Store
 
                 if (paymentEvent == null)
                 {
-                    XsollaLogger.Debug(TAG, $"Unmapped payment event type: {nativePaymentEvent.type}, {result}");
+                    XsollaLogger.Debug(TAG, $"Unmapped payment event type: {nativePaymentEvent.type}, {LogObfuscation.ObfuscateJsonIfEnabled(result)}");
                     return;
                 }
 
                 onNativePaymentEvent?.Invoke(paymentEvent, null);
 
-                XsollaLogger.Debug(TAG, $"Received payment event (event={paymentEvent}): {result}");
+                XsollaLogger.Debug(TAG, $"Received payment event (event={paymentEvent}): {LogObfuscation.ObfuscateJsonIfEnabled(result)}");
             });
         }
         
@@ -269,7 +281,12 @@ namespace Xsolla.SDK.Store
                 sku, finalDeveloperPayload, args.externalId, args.paymentMethodId ?? -1, args.paymentToken, args.allowTokenOnlyFinishedStatusWithoutOrderId,
                 callback: XsollaClientBridgeHelpersIOS.OnXsollaUnityBridgeJsonCallback, 
                 callbackData: XsollaClientBridgeHelpersIOS.CreateCallbackData("Purchase",
-                    onSuccess: result => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToPurchase(result, finalDeveloperPayload)),
+                    onSuccess: result =>
+                    {
+                        var product = XsollaStoreClientHelpers.JsonToPurchase(result, finalDeveloperPayload);
+                        product.origin = m_PurchaseOrigins?.OfPurchaseCallAnswer(result) ?? XsollaStoreClientPurchasedProduct.Origin.Unknown;
+                        onSuccess?.Invoke(product);
+                    },
                     onError: error => onError?.Invoke(error)
                 )
             );
@@ -299,7 +316,7 @@ namespace Xsolla.SDK.Store
         private static extern void _XsollaUnityBridgeValidate(string transactionId, string productId, XsollaClientBridgeHelpersIOS.XsollaUnityBridgeJsonCallbackDelegate callback, Int64 callbackData);
         public void ValidatePurchase(string receipt, ValidatePurchaseResultFunc onSuccess, ErrorFunc onError)
         {
-            XsollaLogger.Debug(Tag, $"ValidatePurchase: {receipt}");
+            XsollaLogger.Debug(Tag, $"ValidatePurchase: {LogObfuscation.ObfuscateJsonIfEnabled(receipt)}");
             
             var r = XsollaStoreClientHelpers.JsonToReceipt(receipt);
             if (r == null)

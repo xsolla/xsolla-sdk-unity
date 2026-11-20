@@ -1,4 +1,5 @@
 #if UNITY_STANDALONE || UNITY_WEBGL || UNITY_EDITOR //&& DISABLED_TMP
+using System;
 using JetBrains.Annotations;
 using UnityEngine;
 using Xsolla.Auth;
@@ -11,6 +12,18 @@ namespace Xsolla.SDK.Login
     {
         private const string Tag = "XsollaLoginClientImplSDK";
         private XsollaSettings _settings;
+
+        /// <summary>
+        /// Revokes a refresh token on the server: <see cref="XsollaAuth.RevokeRefreshToken"/>, or a stand-in in tests.
+        /// </summary>
+        private readonly Action<string, Action, Action<Error>> _revokeRefreshToken;
+
+        public XsollaLoginClientImplStandalone() : this(XsollaAuth.RevokeRefreshToken) { }
+
+        internal XsollaLoginClientImplStandalone(Action<string, Action, Action<Error>> revokeRefreshToken)
+        {
+            _revokeRefreshToken = revokeRefreshToken;
+        }
 
         public void Login(XsollaClientConfiguration configuration, LoginResultFunc onSuccess, ErrorFunc onError)
         {
@@ -126,8 +139,44 @@ namespace Xsolla.SDK.Login
         {
             _settings = FillFromConfiguration(configuration);
 
-            _settings.XsollaToken.DeleteSavedInstance();
-            onSuccess?.Invoke();
+            var token = _settings.XsollaToken;
+
+            // The store shares the saved session, and bills through a device ID one: discarding or revoking it would fail
+            // the store's next refresh. A device ID sign-in returns the same user anyway, as the native SDKs do.
+            if (token.IsBasedOnDeviceId)
+            {
+                XsollaLogger.Debug(Tag, "ClearToken: the saved session is based on device ID, so it is kept");
+                onSuccess?.Invoke();
+            }
+            else
+            {
+                var refreshToken = token.RefreshToken;
+                token.DeleteSavedInstance();
+
+                // The session is already gone on this device, so a failed revoke only leaves its refresh token valid on
+                // the server until it expires, and the sign-out still succeeds.
+                if (string.IsNullOrEmpty(refreshToken))
+                {
+                    XsollaLogger.Debug(Tag, "ClearToken: the session holds no refresh token, so there is none to revoke");
+                    onSuccess?.Invoke();
+                }
+                else
+                {
+                    _revokeRefreshToken(
+                        refreshToken,
+                        () =>
+                        {
+                            XsollaLogger.Debug(Tag, "ClearToken: revoked the session's refresh token");
+                            onSuccess?.Invoke();
+                        },
+                        error =>
+                        {
+                            XsollaLogger.Warning(Tag, $"ClearToken: failed to revoke the session's refresh token: {error}");
+                            onSuccess?.Invoke();
+                        }
+                    );
+                }
+            }
         }
 
         public bool CanRefreshToken =>
@@ -150,8 +199,8 @@ namespace Xsolla.SDK.Login
                     XsollaAuth.RefreshToken(
                         _settings,
                         onSuccess: () => {
-                            XsollaLogger.Debug(Tag, $"Refresh onSuccess: accessToken={_settings.XsollaToken.AccessToken}");
-                            XsollaLogger.Debug(Tag, $"Refresh onSuccess: refreshToken={_settings.XsollaToken.RefreshToken}");
+                            XsollaLogger.Debug(Tag, $"Refresh onSuccess: accessToken={LogRedaction.Tail(_settings.XsollaToken.AccessToken)}");
+                            XsollaLogger.Debug(Tag, $"Refresh onSuccess: refreshToken={LogRedaction.Tail(_settings.XsollaToken.RefreshToken)}");
                             XsollaLogger.Debug(Tag, $"Refresh onSuccess: expirationTime={_settings.XsollaToken.ExpirationTime}");
 
                             onSuccess?.Invoke(TokenCurrent(_settings));
@@ -183,6 +232,9 @@ namespace Xsolla.SDK.Login
                     _ => LogLevel.Errors
                 }
             };
+
+            XDebug.SetLogLevel(settings.LogLevel);
+            LogRedaction.IsEnabled = configuration.secretsObfuscated;
 
             var callback = XsollaLogger.GetOnLogCallback();
             if (callback != null) {

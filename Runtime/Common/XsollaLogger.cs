@@ -1,4 +1,5 @@
 ﻿using System;
+using Xsolla.SDK.Utils;
 
 namespace Xsolla.SDK.Common
 {
@@ -58,6 +59,15 @@ namespace Xsolla.SDK.Common
         /// </summary>
         /// <param name="level">The log level to set.</param>
         public static void SetLogLevel(XsollaLogLevel level) => _level = level;
+
+        /// <summary>
+        /// Applies a client configuration's log settings, its level and whether secrets are obfuscated, to the whole app.
+        /// </summary>
+        internal static void Apply(XsollaClientConfiguration configuration)
+        {
+            SetLogLevel(configuration.logLevel);
+            LogObfuscation.IsEnabled = configuration.secretsObfuscated;
+        }
 
         /// <summary>
         /// Sets the callback to be invoked on log events.

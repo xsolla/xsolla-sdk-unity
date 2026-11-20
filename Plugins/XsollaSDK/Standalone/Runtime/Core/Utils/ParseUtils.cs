@@ -104,25 +104,31 @@ namespace Xsolla.Core
 		public static bool TryGetValueFromUrl(string url, ParseParameter parameter, out string value)
 		{
 			var parameterName = parameter.ToString();
-			var regex = new Regex($"[&?]{parameterName}=[a-zA-Z0-9._+-]+");
-			value = regex.Match(url)
-				.Value
-				.Replace($"{parameterName}=", string.Empty)
-				.Replace("&", string.Empty)
-				.Replace("?", string.Empty);
 
 			switch (parameter)
 			{
+				case ParseParameter.error:
 				case ParseParameter.error_code:
 				case ParseParameter.error_description:
-					value = value?.Replace("+", " ");
+					// Error texts arrive form-encoded: a space as '+', punctuation as a percent escape.
+					value = Uri.UnescapeDataString(MatchQueryValue(url, parameterName, "[a-zA-Z0-9._~+%-]").Replace("+", " "));
 					break;
 				default:
-					XDebug.Log($"Trying to find {parameterName} in URL:{url}");
+					value = MatchQueryValue(url, parameterName, "[a-zA-Z0-9._+-]");
+					XDebug.Log($"Trying to find {parameterName} in URL:{LogRedaction.Redact(url)}");
 					break;
 			}
 
 			return !string.IsNullOrEmpty(value);
+		}
+
+		/// <summary>
+		/// The value of the first <paramref name="parameterName"/> in the query of <paramref name="url"/>,
+		/// as far as it runs in characters of <paramref name="valueCharacter"/>, or an empty string.
+		/// </summary>
+		private static string MatchQueryValue(string url, string parameterName, string valueCharacter)
+		{
+			return new Regex($"[&?]{parameterName}=({valueCharacter}+)").Match(url).Groups[1].Value;
 		}
 	}
 }

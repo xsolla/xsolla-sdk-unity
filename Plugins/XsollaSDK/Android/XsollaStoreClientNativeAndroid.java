@@ -23,6 +23,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -36,10 +37,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** @noinspection unused*/
@@ -106,6 +108,156 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 );
             }
             return billingClient_;
+        }
+    }
+
+    /**
+     * One consume, between the inventory reads that bracket it, as {@link ConsumeActivityTracker#start} opened it.
+     */
+    static final class ConsumeWindow {
+        @NonNull
+        final String sku;
+
+        final boolean isOtherConsumeInFlightAtStart;
+
+        final long skuEventsAtStart;
+
+        final long purchaseEventsAtStart;
+
+        final boolean isPurchaseFlowOpenAtStart;
+
+        ConsumeWindow(
+            @NonNull final String sku,
+            final boolean isOtherConsumeInFlightAtStart,
+            final long skuEventsAtStart,
+            final long purchaseEventsAtStart,
+            final boolean isPurchaseFlowOpenAtStart
+        ) {
+            this.sku = sku;
+            this.isOtherConsumeInFlightAtStart = isOtherConsumeInFlightAtStart;
+            this.skuEventsAtStart = skuEventsAtStart;
+            this.purchaseEventsAtStart = purchaseEventsAtStart;
+            this.isPurchaseFlowOpenAtStart = isPurchaseFlowOpenAtStart;
+        }
+    }
+
+    /**
+     * Tracks what changes a SKU's quantity while a consume of it runs: other consumes of the SKU and purchases.
+     * <p>
+     * Native consumes inventory by SKU, so the SKU's quantity read before and after a consume tells what that consume
+     * did only when nothing else changed the quantity in between. Purchases are tracked for every SKU, since a
+     * purchase flow does not reliably tell its SKU's units apart before it ends. A flow counts from its start until its
+     * result, as its payment may complete on the server at any time in between. Changes made outside this bridge
+     * (another device, the server) are not seen.
+     * <p>
+     * It also counts the bridge's purchases queries in flight: native answers a query sent while another one is pending
+     * with that one's answer, so a read sent then may show the inventory as it was before the consume or a purchase
+     * took effect.
+     */
+    static final class ConsumeActivityTracker {
+        /**
+         * Consume activity of one SKU.
+         */
+        private static final class SkuActivity {
+            private int inFlight = 0;
+
+            private long events = 0;
+        }
+
+        /**
+         * Activity per SKU. A SKU is dropped once no consume of it is in flight, so no open window refers to a dropped
+         * entry.
+         */
+        @NonNull
+        private final Map<String, SkuActivity> bySku = new HashMap<>();
+
+        private long purchaseEvents = 0;
+
+        /**
+         * Whether a purchase flow started and its result has not arrived yet. A flow whose result never arrives keeps
+         * it set, which only leaves later unknown consume outcomes unresolved.
+         */
+        private boolean isPurchaseFlowOpen = false;
+
+        private int queriesInFlight = 0;
+
+        /**
+         * Opens the window of a consume of {@code sku} that starts now.
+         */
+        @NonNull
+        synchronized ConsumeWindow start(@NonNull final String sku) {
+            final SkuActivity activity = bySku.computeIfAbsent(sku, __ -> new SkuActivity());
+            final boolean isOtherConsumeInFlight = activity.inFlight > 0;
+
+            activity.inFlight++;
+            activity.events++;
+
+            return new ConsumeWindow(sku, isOtherConsumeInFlight, activity.events, purchaseEvents, isPurchaseFlowOpen);
+        }
+
+        /**
+         * Whether another consume of the window's SKU was in flight when it opened, or started or finished since.
+         */
+        synchronized boolean isOtherConsumeOverlapped(@NonNull final ConsumeWindow window) {
+            final SkuActivity activity = bySku.get(window.sku);
+
+            return window.isOtherConsumeInFlightAtStart || activity == null || activity.events != window.skuEventsAtStart;
+        }
+
+        /**
+         * Whether a purchase flow was open when the window opened or is open now, or a purchase flow started or a
+         * purchase result arrived since.
+         */
+        synchronized boolean isPurchaseOverlapped(@NonNull final ConsumeWindow window) {
+            return window.isPurchaseFlowOpenAtStart || isPurchaseFlowOpen || purchaseEvents != window.purchaseEventsAtStart;
+        }
+
+        /**
+         * Closes the window once its consume is reported.
+         */
+        synchronized void finish(@NonNull final ConsumeWindow window) {
+            final SkuActivity activity = bySku.get(window.sku);
+
+            if (activity != null) {
+                activity.inFlight--;
+                activity.events++;
+
+                if (activity.inFlight <= 0) {
+                    bySku.remove(window.sku);
+                }
+            }
+        }
+
+        /**
+         * Records that a purchase flow started.
+         */
+        synchronized void onPurchaseFlowStarted() {
+            purchaseEvents++;
+            isPurchaseFlowOpen = true;
+        }
+
+        /**
+         * Records that a purchase result or a purchase flow's error arrived.
+         */
+        synchronized void onPurchaseResult() {
+            purchaseEvents++;
+            isPurchaseFlowOpen = false;
+        }
+
+        /**
+         * Records that the bridge sends a purchases query.
+         *
+         * @return Whether another one is in flight, so native may answer this one with that one's answer.
+         */
+        synchronized boolean onQueryStarted() {
+            return queriesInFlight++ > 0;
+        }
+
+        /**
+         * Records that a purchases query the bridge sent was answered.
+         */
+        synchronized void onQueryFinished() {
+            queriesInFlight--;
         }
     }
 
@@ -225,8 +377,39 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     }
 
     private static boolean logsDebugEnabled = false;
+    private static boolean logsWarningEnabled = false;
     private static boolean logsErrorEnabled = false;
+
+    /**
+     * Whether logged secrets are obfuscated, from the {@code secretsObfuscated} setting of the last configuration
+     * {@code Initialize} applied, like the log level.
+     * <p>
+     * Off by default, as the native SDK's {@code LogSettings.withSecretsObfuscated}; when on, in every build.
+     */
+    private static volatile boolean secretsObfuscated = false;
+
+    /**
+     * The string value of a JSON key that names a token, a secret or a receipt: {@code accessToken},
+     * {@code refresh_token}, {@code token}, {@code paymentToken}, {@code access_token_secret}, {@code receipt} and the
+     * like.
+     */
+    private static final Pattern SECRET_JSON_VALUE =
+        Pattern.compile("(\"[A-Za-z_]*(?:[Tt]oken|[Ss]ecret|[Rr]eceipt)\"\\s*:\\s*\")((?:[^\"\\\\]|\\\\.)*)(?=\")");
     private static boolean useRestore = true;
+
+    /**
+     * Whether consumes go to the user's inventory, i.e. the project does not use the Event API.
+     * <p>
+     * Only an inventory consume can end with an unknown outcome, so only it reads the SKU's quantity around the
+     * consume (see {@link #consumeWithOutcomeCheck}).
+     */
+    private static boolean inventoryConsume = true;
+
+    /**
+     * How long a consume whose outcome is unknown waits before it reads the inventory again, so that a request the
+     * server is still processing has landed by then.
+     */
+    private static final long CONSUME_OUTCOME_CHECK_DELAY_MILLIS = 3000;
 
     @NonNull
     private static SimpleMode simpleMode = SimpleMode.Off;
@@ -268,10 +451,10 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     private static boolean skipNonExistentProductsOnQuery = true;
 
     @NonNull
-    private static final AtomicBoolean forceNonSilentNextWidgetLogin = new AtomicBoolean(false);
+    private final AtomicReference<BillingFlowCanceller> currentPurchaseCanceller = new AtomicReference<>();
 
     @NonNull
-    private final AtomicReference<BillingFlowCanceller> currentPurchaseCanceller = new AtomicReference<>();
+    private final ConsumeActivityTracker consumeActivity = new ConsumeActivityTracker();
 
     /** @noinspection unused*/
     public XsollaStoreClientNativeAndroid(@NonNull final Activity activity) {
@@ -283,6 +466,65 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             Log.d(TAG, msg);
     }
 
+    /**
+     * The secret as a log may hold it: obfuscated while {@link #secretsObfuscated} is on, whole otherwise.
+     * <p>
+     * The obfuscation is the native SDK's {@code StringUtils.obfuscate}, ported because that class is package-private
+     * and keyed to the native library's own build type, so one token reads the same in both logs. A value too short
+     * to spare its last 12 characters is replaced by a hash of it, which still tells two values apart.
+     */
+    @NonNull
+    private static String mask(@Nullable final String secret) {
+        if (!secretsObfuscated) {
+            return String.valueOf(secret);
+        } else if (secret == null || secret.isEmpty()) {
+            return "<absent>";
+        } else if (secret.length() < 16) {
+            return String.format(Locale.ROOT, "#%08x", (int) stableHash64(secret));
+        } else {
+            return "..." + secret.substring(secret.length() - 12);
+        }
+    }
+
+    /**
+     * The JSON with the value of each key naming a token, a secret or a receipt passed through {@link #mask}.
+     */
+    @Nullable
+    private static String maskJson(@Nullable final String json) {
+        if (!secretsObfuscated || json == null) {
+            return json;
+        } else {
+            final Matcher matcher = SECRET_JSON_VALUE.matcher(json);
+            final StringBuffer masked = new StringBuffer();
+            while (matcher.find()) {
+                matcher.appendReplacement(masked, Matcher.quoteReplacement(matcher.group(1) + mask(matcher.group(2))));
+            }
+            return matcher.appendTail(masked).toString();
+        }
+    }
+
+    /**
+     * The native SDK's {@code HashUtils.computeStableHash64}: FNV-1a over the UTF-8 bytes, finalized with the
+     * MurmurHash3 64-bit mixer.
+     */
+    private static long stableHash64(@NonNull final String value) {
+        long hash = 0xCBF29CE484222325L;
+        for (final byte b : value.getBytes(StandardCharsets.UTF_8)) {
+            hash = (hash ^ (b & 0xFF)) * 0x100000001B3L;
+        }
+        hash ^= hash >>> 33;
+        hash *= 0xFF51AFD7ED558CCDL;
+        hash ^= hash >>> 33;
+        hash *= 0xC4CEB9FE1A85EC53L;
+        hash ^= hash >>> 33;
+        return hash;
+    }
+
+    private static void logWarning(String msg) {
+        if (logsWarningEnabled)
+            Log.w(TAG, msg);
+    }
+
     private static void logError(String msg) {
         if (logsErrorEnabled)
             Log.e(TAG, msg);
@@ -290,6 +532,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     private void reportPurchaseError(@NonNull final BillingResult billingResult) {
         logError(billingResult.toString());
+
+        consumeActivity.onPurchaseResult();
 
         mainThreadHandler.post(() -> {
             if (m_purchaseCallback != null) {
@@ -327,10 +571,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
         //XsollaLogLevel{ Debug,  Warning,  Error,  None }
         logsDebugEnabled = logs.map( l -> l.equals("Debug")).orElse(false);
+        logsWarningEnabled = logs.map( l -> l.equals("Debug") || l.equals("Warning")).orElse(false);
         logsErrorEnabled = logs.map( l -> !l.equals("None")).orElse(false);
+        secretsObfuscated = maybeJson.map(json -> json.optBoolean("secretsObfuscated", false)).orElse(false);
 
         useRestore = maybeSettingsJson
             .map(settingsJson -> settingsJson.optBoolean("localPurchasesRestore"))
+            .orElse(true);
+
+        inventoryConsume = maybeSettingsJson
+            .map(settingsJson -> !settingsJson.optString("webhooksMode", "").equalsIgnoreCase("eventsapi"))
             .orElse(true);
 
         simpleMode = maybeJson
@@ -412,8 +662,6 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .map(json -> json.optBoolean("skipNonExistentProductsOnQuery", true))
             .orElse(true);
 
-        forceNonSilentNextWidgetLogin.set(false);
-
         final Optional<JSONObject> maybeAdvancedSettings =
             maybeSettingsJson.flatMap(settingsJson ->
                 JsonHelper.getChildObject(settingsJson, "advancedSettingsAndroid")
@@ -485,7 +733,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 .map(advancedSettings -> advancedSettings.optBoolean("collapseRestoredMultiUnitPurchases"))
                 .orElse(false);
 
-        logDebug("Initialize: " + argsJson);
+        logDebug("Initialize: " + maskJson(argsJson));
         logDebug("SimpleMode: " + simpleMode);
         logDebug("UseBuyButtonSolution: " + useBuyButtonSolution);
         logDebug("LocalPurchasesRestore: " + useRestore);
@@ -500,7 +748,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         logDebug("RedirectAppRelaunchEnabled: " + redirectAppRelaunchEnabled);
         logDebug("CollapseRestoredMultiUnitPurchases: " + collapseRestoredMultiUnitPurchases);
 //      logDebug("InvokePurchasesUpdatedIfOrderIdMissing: " + fetchProductsWithGeoLocale);
-        logDebug("AdditionalSettings: " + maybeAdditionalSettingsJson.orElse(null));
+        logDebug("AdditionalSettings: " + maskJson(String.valueOf(maybeAdditionalSettingsJson.orElse(null))));
 
         // Per-SKU product-fetch tunables. Unity governs them for every platform and resolves nulls to
         // its own defaults before sending concrete values in the additional settings, so the bridge
@@ -600,7 +848,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                                         )
                                     );
                             } else {
-                                Log.w(TAG, "Browser provider configuration has been specified, but the activity type " +
+                                logWarning("Browser provider configuration has been specified, but the activity type " +
                                     "isn't either `WebViewType.System` or `WebViewType.Trusted` (current=" +
                                     newActivity.getClass().getSimpleName() + ")"
                                 );
@@ -672,7 +920,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("Restore: " + argsJson);
+        logDebug("Restore: " + maskJson(argsJson));
 
         if (!useRestore) { // ignore restore
 
@@ -689,7 +937,11 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             .setProductType(productType.orElse(BillingClient.ProductType.INAPP))
             .build();
 
+        consumeActivity.onQueryStarted();
+
         billingClient.queryPurchasesAsync(params, (result, purchases) -> {
+            consumeActivity.onQueryFinished();
+
             if (result.getResponseCode() != BillingClient.BillingResponseCode.OK || purchases == null ) {
                 callback.onError(result.toString());
                 return;
@@ -709,7 +961,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("ProductsRequest: " + argsJson);
+        logDebug("ProductsRequest: " + maskJson(argsJson));
 
         final var billingClient = billingClientHolder.getOrThrowIfNotReady();
         final var json = JsonHelper.parse(argsJson);
@@ -737,9 +989,12 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     /** @noinspection unused*/
     public void Purchase(@NonNull final String argsJson) {
-        logDebug("Purchase: " + argsJson);
+        logDebug("Purchase: " + maskJson(argsJson));
 
         final var billingClient = billingClientHolder.getOrThrowIfNotReady();
+
+        consumeActivity.onPurchaseFlowStarted();
+
         final var json = JsonHelper.parse(argsJson);
         final var sku = json.map(JsonHelper::jsonToPurchaseSKU).orElse("");
         final var maybeDeveloperPayload = json.flatMap(JsonHelper::jsonToDeveloperPayload);
@@ -835,9 +1090,12 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 future.thenAcceptAsync(either -> {
                     mainThreadHandler.post(() -> {
                         either.voidFold(
-                            err -> m_purchaseCallback.onError(
-                                JsonHelper.billingResultToJson(err.toBillingResult())
-                            ),
+                            err -> {
+                                consumeActivity.onPurchaseResult();
+                                m_purchaseCallback.onError(
+                                    JsonHelper.billingResultToJson(err.toBillingResult())
+                                );
+                            },
                             __ -> { /* no-op on success */ }
                         );
                     });
@@ -886,7 +1144,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("CancelActivePurchase: " + argsJson);
+        logDebug("CancelActivePurchase: " + maskJson(argsJson));
 
         final BillingFlowCanceller billingFlowCanceller = currentPurchaseCanceller.getAndSet(null);
         if (billingFlowCanceller != null) {
@@ -901,7 +1159,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("Consume: " + argsJson);
+        logDebug("Consume: " + maskJson(argsJson));
 
         final var billingClient = billingClientHolder.getOrThrowIfNotReady();
         final var maybeJson = JsonHelper.parse(argsJson);
@@ -909,40 +1167,208 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             try {
                 return Optional.of(json.getString("receipt"));
             } catch (Exception e) {
-                Log.e(TAG, "Failed to parse the consume arguments: " + argsJson);
+                logError("Failed to parse the consume arguments: " + maskJson(argsJson));
                 return Optional.empty();
             }
         });
 
         if (maybePurchaseToken.isPresent()) {
-            final var params =
-                ConsumeParams
-                    .newBuilder()
-                    .setPurchaseToken(maybePurchaseToken.get())
-                    .build();
+            // Validated by the purchase token parse above, which needs the same JSON.
+            final JSONObject json = maybeJson.get();
+            final int quantity = json.optInt("quantity", 0);
+            final String sku = json.optString("sku", "");
 
-            billingClient.consumeAsync(params, (result, purchaseToken_) -> {
-                if (result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
-                    callback.onError(result.toString());
-                    return;
-                }
+            final ConsumeParams.Builder paramsBuilder = ConsumeParams
+                .newBuilder()
+                .setPurchaseToken(maybePurchaseToken.get());
 
-                var resultJsonObject = JsonHelper.consumeToJson(purchaseToken_);
-                if (resultJsonObject.isPresent())
-                    callback.onSuccess(resultJsonObject.get().toString());
-                else
-                    callback.onError("Failed to prepare the resulting JSON for consume.");
-            });
+            // Unset, native consumes the purchase's whole quantity, as an Event API project always does: it fails a
+            // quantity other than the purchase's.
+            if (inventoryConsume && quantity >= 1) {
+                paramsBuilder.setQuantity(quantity);
+            }
+
+            final ConsumeParams params = paramsBuilder.build();
+
+            if (inventoryConsume && quantity >= 1 && !TextUtils.isEmpty(sku)) {
+                consumeWithOutcomeCheck(billingClient, params, sku, quantity, callback);
+            } else {
+                billingClient.consumeAsync(params, (result, purchaseToken_) ->
+                    reportConsume(result, purchaseToken_, callback)
+                );
+            }
         } else {
             callback.onError("A valid purchase token is required for consumption: " + argsJson);
         }
+    }
+
+    /**
+     * Consumes from the user's inventory, reading the SKU's quantity before the consume and, when the consume's
+     * outcome is unknown, again after it.
+     * <p>
+     * Native consumes inventory at most once: a {@code 5xx} or a connection lost after the request was written is
+     * answered with an unknown outcome, and since native consumes by SKU, a blind retry after a consume that did land
+     * consumes another unit the user owns. With the outcome unknown this reports both quantities and whether anything
+     * else touched the SKU's quantity meanwhile, and the C# side decides whether the consume landed
+     * ({@code XsollaConsumeOutcomeCheckAndroid}). Any other answer is reported as {@link #reportConsume} does.
+     */
+    private void consumeWithOutcomeCheck(
+        @NonNull final BillingClient billingClient,
+        @NonNull final ConsumeParams params,
+        @NonNull final String sku,
+        final int quantity,
+        @NonNull final IXsollaUnityBridgeJsonCallback callback
+    ) {
+        final ConsumeWindow window = consumeActivity.start(sku);
+
+        querySkuQuantity(billingClient, sku, maybeQuantityBefore -> {
+            try {
+                billingClient.consumeAsync(params, (result, purchaseToken_) -> {
+                    if (isConsumeOutcomeUnknown(result)) {
+                        logError("Consume: the outcome is unknown, reading the inventory again (sku=" + sku +
+                            " quantity=" + quantity + "): " + result
+                        );
+
+                        mainThreadHandler.postDelayed(() ->
+                            querySkuQuantity(billingClient, sku, maybeQuantityAfter -> {
+                                final boolean isOtherConsumeOverlapped = consumeActivity.isOtherConsumeOverlapped(window);
+                                final boolean isPurchaseOverlapped = consumeActivity.isPurchaseOverlapped(window);
+
+                                consumeActivity.finish(window);
+
+                                callback.onError(JsonHelper.consumeOutcomeUnknownToJson(
+                                    result,
+                                    quantity,
+                                    maybeQuantityBefore,
+                                    maybeQuantityAfter,
+                                    isOtherConsumeOverlapped,
+                                    isPurchaseOverlapped
+                                ));
+                            }),
+                            CONSUME_OUTCOME_CHECK_DELAY_MILLIS
+                        );
+                    } else {
+                        consumeActivity.finish(window);
+
+                        reportConsume(result, purchaseToken_, callback);
+                    }
+                });
+            } catch (final Exception e) {
+                // Thrown before native took the consume, so it sent nothing.
+                consumeActivity.finish(window);
+
+                callback.onError("Failed to start the consume (sku=" + sku + " quantity=" + quantity + "): " + e);
+            }
+        });
+    }
+
+    /**
+     * Whether a consume's answer may hide a consume that landed.
+     * <p>
+     * Native marks the at-most-once answer only through package-private state and the opening of its debug message,
+     * so it is told by its public signals: {@link BillingClient.BillingResponseCode#ERROR} that is not recoverable.
+     * This also takes in non-recoverable errors whose consume provably sent nothing, such as an expired access token;
+     * the C# side tells those apart by the message and reports them as failed, as before, unless the inventory shows
+     * the consume landed.
+     */
+    private static boolean isConsumeOutcomeUnknown(@NonNull final BillingResult result) {
+        return result.getResponseCode() == BillingClient.BillingResponseCode.ERROR && !result.isRecoverable();
+    }
+
+    /**
+     * Reports a consume's answer to C#: the consumed purchase token, or the result's text on failure.
+     * <p>
+     * A quantity above the purchase's ({@link BillingClient.BillingResponseCode#DEVELOPER_ERROR}) or a partial
+     * consume in an Event API project ({@link BillingClient.BillingResponseCode#FEATURE_NOT_SUPPORTED}) sent
+     * nothing and fails the same way on every attempt, so neither is checked against the inventory.
+     */
+    private static void reportConsume(
+        @NonNull final BillingResult result,
+        @Nullable final String purchaseToken,
+        @NonNull final IXsollaUnityBridgeJsonCallback callback
+    ) {
+        if (result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
+            callback.onError(result.toString());
+        } else {
+            final Optional<JSONObject> resultJsonObject = JsonHelper.consumeToJson(purchaseToken);
+
+            if (resultJsonObject.isPresent()) {
+                callback.onSuccess(resultJsonObject.get().toString());
+            } else {
+                callback.onError("Failed to prepare the resulting JSON for consume.");
+            }
+        }
+    }
+
+    /**
+     * Reads the total quantity of {@code sku} in the user's purchases, empty when the query fails or may have been
+     * answered with an older one's answer.
+     * <p>
+     * Native answers a query sent while another one is pending with that one's answer, which may show the inventory
+     * as it was before the consume or a purchase took effect. Such a read is not trusted, which leaves the consume's
+     * outcome unresolved rather than misread.
+     */
+    private void querySkuQuantity(
+        @NonNull final BillingClient billingClient,
+        @NonNull final String sku,
+        @NonNull final Consumer<Optional<Integer>> onQuantity
+    ) {
+        final QueryPurchasesParams params = QueryPurchasesParams
+            .newBuilder()
+            .setProductType(BillingClient.ProductType.INAPP)
+            .build();
+
+        final boolean isOtherQueryInFlight = consumeActivity.onQueryStarted();
+
+        try {
+            billingClient.queryPurchasesAsync(params, (result, purchases) -> {
+                consumeActivity.onQueryFinished();
+
+                if (result.getResponseCode() != BillingClient.BillingResponseCode.OK || purchases == null) {
+                    logError("Consume: failed to read the quantity of " + sku + ": " + result);
+
+                    onQuantity.accept(Optional.empty());
+                } else if (isOtherQueryInFlight) {
+                    logDebug("Consume: the quantity of " + sku + " may predate the consume, the read was sent while " +
+                        "another purchases query was pending"
+                    );
+
+                    onQuantity.accept(Optional.empty());
+                } else {
+                    onQuantity.accept(Optional.of(skuQuantity(purchases, sku)));
+                }
+            });
+        } catch (final Exception e) {
+            consumeActivity.onQueryFinished();
+            logError("Consume: failed to read the quantity of " + sku + ": " + e);
+
+            onQuantity.accept(Optional.empty());
+        }
+    }
+
+    /**
+     * The total quantity of the purchases whose product is {@code sku}.
+     * <p>
+     * Summed over every row, since native may restore one inventory item as several rows (one per unit below 100
+     * units by default).
+     */
+    static int skuQuantity(@NonNull final List<Purchase> purchases, @NonNull final String sku) {
+        return purchases
+            .stream()
+            .filter(purchase -> {
+                final List<String> products = purchase.getProducts();
+
+                return !products.isEmpty() && sku.equals(products.get(0));
+            })
+            .mapToInt(Purchase::getQuantity)
+            .sum();
     }
 
     public void Validate(
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("Validate: " + argsJson);
+        logDebug("Validate: " + maskJson(argsJson));
 
         final var billingClient = billingClientHolder.getOrThrowIfNotReady();
         final var maybeJson = JsonHelper.parse(argsJson);
@@ -981,7 +1407,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                                 logDebug(String.format(
                                     Locale.getDefault(),
                                     "Purchase has been successfully validated (purchaseToken='%s')",
-                                    purchaseToken_
+                                    mask(purchaseToken_)
                                 ));
                                 callback.onSuccess(maybeResultJson.get().toString());
                             } else {
@@ -1000,7 +1426,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     Locale.getDefault(),
                     "Validation has automatically succeeded for a restored " +
                         "purchase (purchaseToken='%s')",
-                    purchaseToken
+                    mask(purchaseToken)
                 ));
                 final var maybeResultJson = JsonHelper.NativeValidateResult
                     .parse(purchaseToken)
@@ -1036,14 +1462,14 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("GetAccessToken: " + argsJson);
+        logDebug("GetAccessToken: " + maskJson(argsJson));
 
         final var billingClient = billingClientHolder.getOrThrowIfNotReady();
 
         billingClient.getAuthenticationToken((billingResult, authToken) -> {
             logDebug(String.format(Locale.getDefault(),
                 "GetAccessToken: Response: BillingResult=%s Token='%s'",
-                billingResult, authToken != null ? authToken.getValue().toString() : ""
+                billingResult, authToken != null ? mask(authToken.getValue().toString()) : ""
             ));
 
             final var maybeJson = Optional
@@ -1054,7 +1480,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
             if (maybeJson.isPresent()) {
                 final var jsonStr = maybeJson.get();
-                logDebug("GetAccessToken: Response: Json=\n" + jsonStr);
+                logDebug("GetAccessToken: Response: Json=\n" + maskJson(jsonStr));
                 callback.onSuccess(jsonStr);
             } else {
                 callback.onError(billingResult.toString());
@@ -1066,7 +1492,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson, // just token
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("UpdateAccessToken: " + argsJson);
+        logDebug("UpdateAccessToken: " + mask(argsJson));
 
         final JWTRefresher jwtRefresher_ = jwtRefresher.get();
         if (jwtRefresher_ != null) {
@@ -1094,9 +1520,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     )
     {
-        logDebug("LoginWithSocialAccount: args=" + argsJson);
+        logDebug("LoginWithSocialAccount: args=" + maskJson(argsJson));
         logDebug("LoginWithSocialAccount: provider=" + provider);
-        logDebug("LoginWithSocialAccount: accountToken=" + accountToken);
+        logDebug("LoginWithSocialAccount: accountToken=" + mask(accountToken));
 
         final CompletableFuture<LoginResult> future = new CompletableFuture<>();
 
@@ -1210,11 +1636,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String argsJson,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        final var forceNonSilent = forceNonSilentNextWidgetLogin.getAndSet(false);
-        final var openMode = forceNonSilent
-            ? LoginXsollaWidget.OpenMode.Interactive
-            : LoginXsollaWidget.OpenMode.SilentWithInteractiveFallback;
-        LoginWithWidgetImpl(argsJson, openMode, "LoginWithWidget", callback);
+        LoginWithWidgetImpl(
+            argsJson, LoginXsollaWidget.OpenMode.SilentWithInteractiveFallback, "LoginWithWidget", callback
+        );
     }
 
     public void LoginSilently(
@@ -1229,8 +1653,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String loginInfoJsonStr,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("RefreshToken: args=" + argsJsonStr);
-        logDebug("RefreshToken: loginInfo=" + loginInfoJsonStr);
+        logDebug("RefreshToken: args=" + maskJson(argsJsonStr));
+        logDebug("RefreshToken: loginInfo=" + maskJson(loginInfoJsonStr));
 
         final var future = new CompletableFuture<LoginResult>();
 
@@ -1314,20 +1738,26 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     ) {
         logDebug(String.format(Locale.getDefault(),
             "[ClearToken] Clearing token (args='%s')..",
-            argsJson
+            maskJson(argsJson)
         ));
 
-        forceNonSilentNextWidgetLogin.set(true);
+        final var maybeArgs = JsonHelper.parse(argsJson).flatMap(JsonHelper::parseWidgetSessionArgs);
 
-        mainThreadHandler.post(() -> {
-            try {
-                callback.onSuccess(XsollaUnityBridgeJsonCallbackUtil.EMPTY_RESULT);
-            } catch (Exception e) {
-                callback.onError(String.format(Locale.getDefault(),
-                    "[ClearToken] Failed to serialize the result data into JSON: " + e
-                ));
-            }
-        });
+        if (maybeArgs.isPresent()) {
+            LoginXsollaWidget.signOut(activity, maybeArgs.get(), either -> either.voidFold(
+                // An error means the session is still saved on this device: a sign-out whose server revoke alone
+                // fails is answered as success, the native SDK logging the failure as a warning.
+                err -> {
+                    logError("[ClearToken] Failed to sign out: " + err);
+                    callback.onError(err.toString());
+                },
+                unit -> callback.onSuccess(XsollaUnityBridgeJsonCallbackUtil.EMPTY_RESULT)
+            ));
+        } else {
+            logDebug("[ClearToken] The configuration names no widget session, so there is none to sign out of");
+
+            mainThreadHandler.post(() -> callback.onSuccess(XsollaUnityBridgeJsonCallbackUtil.EMPTY_RESULT));
+        }
     }
 
     public static String GetInstallerPackageName(@NonNull final Context context) {
@@ -1366,6 +1796,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
     @Override
     public void onPurchasesUpdated( @NonNull final BillingResult result, @Nullable final List<Purchase> purchases ) {
+        consumeActivity.onPurchaseResult();
+
         if (result.getResponseCode() != BillingClient.BillingResponseCode.OK || purchases == null) {
             m_purchaseCallback.onError(JsonHelper.billingResultToJson(result));
             return;
@@ -1387,7 +1819,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @NonNull final String logTag,
         @NonNull final IXsollaUnityBridgeJsonCallback callback
     ) {
-        logDebug("LoginWithWidget: " + argsJson);
+        logDebug("LoginWithWidget: " + maskJson(argsJson));
 
         final var future = new CompletableFuture<LoginResult>();
 
@@ -1448,7 +1880,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             } catch (Exception e) {
                 parsedJson = Optional.empty();
 
-                logError(String.format("Failed to parse JSON (%s)", e));
+                logError(String.format("Failed to parse JSON (%s)", maskJson(String.valueOf(e))));
             }
 
             return parsedJson;
@@ -1654,6 +2086,48 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             }
         }
 
+        /**
+         * The widget session the configuration {@code json} names by its login project and its OAuth 2.0 client.
+         * <p>
+         * Read from the settings alone: unlike {@link #jsonToConfig}, an access token in the configuration does not
+         * hide the session, and no JWT refresher of a live store is replaced. Empty where either ID is missing or
+         * invalid.
+         */
+        @NonNull
+        public static Optional<LoginXsollaWidget.Args> parseWidgetSessionArgs(@NonNull final JSONObject json) {
+            return getChildObject(json, "settings").flatMap(settings ->
+                LoginUuid.parse(settings.optString("loginId", "")).asRight().flatMap(loginUuid ->
+                    OAuth2ClientId.parse(settings.optInt("oauthClientId", 0)).asRight()
+                        .filter(oauthClientId -> oauthClientId.toInteger() > 0)
+                        .map(oauthClientId -> new LoginXsollaWidget.Args(loginUuid, oauthClientId)
+                            .withLogSettings(parseLogSettings(json))
+                        )
+                )
+            );
+        }
+
+        /**
+         * The native log settings for the configuration {@code json}'s {@code logLevel} and {@code secretsObfuscated}.
+         * <p>
+         * The native SDK cannot be silenced, so {@code None}, like a missing or unknown level, logs errors only. An
+         * absent {@code secretsObfuscated} means off: the C# side omits the key unless it is on.
+         */
+        @NonNull
+        public static LogSettings parseLogSettings(@NonNull final JSONObject json) {
+            final String logLevel = json.optString("logLevel", "None");
+            final LogLevel nativeLogLevel;
+            if (logLevel.equals("Debug")) {
+                nativeLogLevel = LogLevel.VERBOSE;
+            } else if (logLevel.equals("Warning")) {
+                nativeLogLevel = LogLevel.WARN;
+            } else {
+                nativeLogLevel = LogLevel.ERROR;
+            }
+            return LogSettings.of()
+                .withLogLevel(nativeLogLevel)
+                .withSecretsObfuscated(json.optBoolean("secretsObfuscated", false));
+        }
+
         @NonNull
         private static Optional<Config> jsonToConfig(@NonNull final JSONObject json) {
             final var settings = getChildObject(json,"settings").orElse(null);
@@ -1674,7 +2148,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 ));
             final var token = JWT.parse(json.optString("accessToken", ""));
             final var sandbox = json.optBoolean("sandbox", false);
-            final var logLevel = json.optString("logLevel", "None");
+            final var logSettings = parseLogSettings(json);
             final var locale = json.optString("locale", "");
             final var sdkName = json.optString("sdkName", "Unity");
             final var sdkVersion = json.optString("sdkVersion", "unknown");
@@ -1693,7 +2167,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 logDebug(String.format(Locale.getDefault(),
                     "SocialProvider:\n  * Name: %s\n  * AccessToken: %s",
                     socialProviderInfo.getProvider().getName(),
-                    socialProviderInfo.getAccessToken()
+                    mask(socialProviderInfo.getAccessToken())
                 ));
             });
 
@@ -1704,7 +2178,8 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             final var config = Config.Common.getDefault()
                 .withSandboxEnabled(sandbox)
                 .withLocaleOverride(LocaleInfo.parse(locale).getRightOr((LocaleInfo) null))
-                .withLogLevel(logLevel.equals("Debug") ? LogLevel.VERBOSE : LogLevel.ERROR)
+                .withLogLevel(logSettings.getLogLevel())
+                .withSecretsObfuscated(logSettings.isSecretsObfuscated())
                 .withFetchPersonalizedProductsOnly(fetchPersonalizedProductsOnly)
                 .withUseGeoLocaleOnProductQuery(fetchProductsWithGeoLocale)
                 .withSkipNonExistentProductsOnQuery(skipNonExistentProductsOnQuery);
@@ -1863,16 +2338,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 try {
                     redirectUri = Uri.parse(redirectUrl);
 
-                    Log.d(TAG, String.format(Locale.getDefault(),
+                    logDebug(String.format(Locale.getDefault(),
                         "Redirect URL was overridden: %s", redirectUri.toString()
                     ));
                 } catch (Exception e) {
-                    Log.d(TAG, String.format(Locale.getDefault(),
+                    logDebug(String.format(Locale.getDefault(),
                         "Failed to parse redirect URL: %s", redirectUrl
                     ));
                 }
             } else {
-                Log.d(TAG, "Redirect URL wasn't overridden, will use the defaults");
+                logDebug("Redirect URL wasn't overridden, will use the defaults");
             }
 
             final var paymentsConfig = Config.Payments.getDefault()
@@ -1905,9 +2380,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             }
 
             if (token.asRight().isPresent()) {
-                Log.d(TAG, String.format(Locale.getDefault(),
+                logDebug(String.format(Locale.getDefault(),
                     "Evaluating authentication based on project ID and JWT token (access_token=%s)",
-                    token.mapRight(JWT::getToken).getRightOr(__ -> "n/a")
+                    mask(token.mapRight(JWT::getToken).getRightOr(__ -> "n/a"))
                 ));
 
                 maybeSocialProviderInfo.ifPresent(__ -> {
@@ -1919,9 +2394,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
                 return token.flatMapRight(t ->
                     projectId.mapRight(pid -> {
-                        Log.d(TAG, String.format(Locale.getDefault(),
+                        logDebug(String.format(Locale.getDefault(),
                             "Authenticating based on project ID and JWT token (project_id=%d access_token=%s)",
-                            pid.value, t.getToken()
+                            pid.value, mask(t.getToken())
                         ));
                         final JWTRefresher refresher = new JWTRefresher();
                         jwtRefresher.set(refresher);
@@ -1940,7 +2415,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 );
             }
             else if (oauthId.asRight().isPresent()) {
-                Log.d(TAG, String.format(Locale.getDefault(),
+                logDebug(String.format(Locale.getDefault(),
                     "Evaluating authentication based on project ID, login ID and OAuth2 client ID (oauth2_client_id=%s)",
                     oauthId.mapRight(__ -> String.valueOf(__.toInteger())).getRightOr("n/a")
                 ));
@@ -1953,17 +2428,17 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                             if (maybeSocialProviderInfo.isPresent()) {
                                 final SocialProviderInfo socialProviderInfo = maybeSocialProviderInfo.get();
 
-                                Log.d(TAG, String.format(Locale.getDefault(),
+                                logDebug(String.format(Locale.getDefault(),
                                     "Authenticating using project ID, login ID, OAuth2 client ID and social " +
                                     "token (project_id=%d login_id=%s oauth2_client_id=%d social_token=%s)",
-                                    pid.value, lid, oid.toInteger(), socialProviderInfo.accessToken
+                                    pid.value, lid, oid.toInteger(), mask(socialProviderInfo.accessToken)
                                 ));
 
                                 authentication = Config.Integration.Xsolla.Authentication.forSocial(
                                     pid, lid, oid, socialProviderInfo.getProvider(), socialProviderInfo.getAccessToken()
                                 );
                             } else {
-                                Log.d(TAG, String.format(Locale.getDefault(),
+                                logDebug(String.format(Locale.getDefault(),
                                     "Authenticating using project ID, login ID and OAuth2 client ID based on device ID " +
                                     "(project_id=%d login_id=%s oauth2_client_id=%d)",
                                     pid.value, lid, oid.toInteger()
@@ -1989,7 +2464,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 );
             }
             else {
-                Log.d(TAG, "Evaluating authentication based on project ID, login ID");
+                logDebug("Evaluating authentication based on project ID, login ID");
 
                 return projectId
                     .flatMapRight(pid -> loginUuid.mapRight(luuid -> {
@@ -1998,17 +2473,17 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                         if (maybeSocialProviderInfo.isPresent()) {
                             final SocialProviderInfo socialProviderInfo = maybeSocialProviderInfo.get();
 
-                            Log.d(TAG, String.format(Locale.getDefault(),
+                            logDebug(String.format(Locale.getDefault(),
                                 "Authenticating using project ID, login ID and social " +
                                 "token (project_id=%d login_id=%s social_token=%s)",
-                                pid.value, luuid, socialProviderInfo.accessToken
+                                pid.value, luuid, mask(socialProviderInfo.accessToken)
                             ));
 
                             authentication = Config.Integration.Xsolla.Authentication.forSocial(
                                 pid, luuid, socialProviderInfo.getProvider(), socialProviderInfo.getAccessToken()
                             );
                         } else {
-                            Log.d(TAG, String.format(Locale.getDefault(),
+                            logDebug(String.format(Locale.getDefault(),
                                 "Authenticating using project ID, login ID based on device ID " +
                                 "(project_id=%d login_id=%s)",
                                 pid.value, luuid
@@ -2226,6 +2701,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     .put("quantity", purchase.getQuantity())
                     // Zero for purchases restored from the inventory, which records no purchase history.
                     .put("purchaseTimeMillis", purchase.getPurchaseTime())
+                    .put("origin", purchase.getOrigin().getWireName())
                     .put("receipt", purchase.getPurchaseToken());
             } catch (Exception e) {
                 logError("Failed to convert a purchase into JSON object (" + productId + ")");
@@ -2262,6 +2738,47 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             return purchaseTokenToJson(token);
         }
 
+        /**
+         * The error JSON of a consume whose outcome is unknown, carrying what C# needs to decide whether it landed.
+         * <p>
+         * The SKU's quantities are absent when their query failed. Should the JSON fail to build, the result's text is
+         * returned behind the native message's opening, which C# takes as an outcome it cannot decide.
+         */
+        @NonNull
+        static String consumeOutcomeUnknownToJson(
+            @NonNull final BillingResult result,
+            final int quantity,
+            @NonNull final Optional<Integer> maybeSkuQuantityBefore,
+            @NonNull final Optional<Integer> maybeSkuQuantityAfter,
+            final boolean isOtherConsumeOverlapped,
+            final boolean isPurchaseOverlapped
+        ) {
+            try {
+                final JSONObject outcome = new JSONObject()
+                    .put("quantity", quantity)
+                    .put("otherConsumeOverlapped", isOtherConsumeOverlapped)
+                    .put("purchaseOverlapped", isPurchaseOverlapped);
+
+                if (maybeSkuQuantityBefore.isPresent()) {
+                    outcome.put("skuQuantityBefore", maybeSkuQuantityBefore.get().intValue());
+                }
+
+                if (maybeSkuQuantityAfter.isPresent()) {
+                    outcome.put("skuQuantityAfter", maybeSkuQuantityAfter.get().intValue());
+                }
+
+                return new JSONObject()
+                    .put("message", result.getDebugMessage())
+                    .put("code", "Internal")
+                    .put("consumeOutcomeUnknown", outcome)
+                    .toString();
+            } catch (JSONException e) {
+                logError("Failed to convert an unknown consume outcome into JSON: " + e);
+
+                return "The consume outcome is unknown: " + result;
+            }
+        }
+
         @NonNull
         private static Optional<JSONObject> validateToJson(
             @NonNull final NativeValidateResult nativeValidateResult
@@ -2296,7 +2813,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 resultJsonObject = new JSONObject()
                     .put("purchase_token", purchaseToken);
             } catch (Exception e) {
-                logError("Failed to convert a consume into JSON object (" + purchaseToken + ")");
+                logError("Failed to convert a consume into JSON object (" + mask(purchaseToken) + ")");
                 resultJsonObject = null;
             }
             return Optional.ofNullable(resultJsonObject);
@@ -2333,6 +2850,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     return maybeLoginUuidWithOAuth2ClientId.map(tpl ->
                         new LoginXsollaWidget.Args(tpl.first, tpl.second)
                             .withLocale(config_.getCommon().getLocaleOverride().orElse(null))
+                            .withLogSettings(parseLogSettings(json))
                     );
                 } else {
                     return Optional.empty();

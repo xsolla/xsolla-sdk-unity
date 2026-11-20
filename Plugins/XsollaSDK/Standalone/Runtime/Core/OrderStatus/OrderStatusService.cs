@@ -54,7 +54,7 @@ namespace Xsolla.Core
 
             var url = PayStationUrlBuilder.GetPaystationHost(settings) + $"paystation2/api/payments/status?access_token={accessToken}";
 
-            XDebug.Log(settings, $"[OrderInfo.Query] url={url}");
+            XDebug.Log(settings, $"[OrderInfo.Query] url={LogRedaction.Redact(url)}");
 
             WebRequestHelper.Instance.GetRequest<OrderInfo.Response>(sdkType, url, requestHeader: null,
                 onComplete: response =>

@@ -60,6 +60,19 @@ namespace Xsolla.Core
 			return AddParam("response_type", value);
 		}
 
+		/// <summary>
+		/// Adds the PKCE (RFC 7636) challenge and pins the method to S256. A null or empty
+		/// value adds neither param, which sends the pre-PKCE request shape.
+		/// </summary>
+		public UrlBuilder AddCodeChallenge(string value)
+		{
+			if (string.IsNullOrWhiteSpace(value))
+				return this;
+
+			return AddParam("code_challenge", value)
+				.AddParam("code_challenge_method", "S256");
+		}
+
 		public UrlBuilder AddScope(string value)
 		{
 			return AddParam("scope", value);
