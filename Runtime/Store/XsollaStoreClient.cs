@@ -10,6 +10,8 @@ namespace Xsolla.SDK.Store
     /// </summary>
     public class XsollaStoreClient
     {
+        private const string Tag = "XsollaStoreClient";
+
         private readonly IXsollaStoreClient _storeImpl = XsollaStoreClientFactory.Create();
         private readonly List<string> _products = new List<string>();
         private readonly Action<XsollaStoreClientPurchasedProduct, XsollaStoreClientError> _onRestore;
@@ -76,20 +78,18 @@ namespace Xsolla.SDK.Store
             _settingsFuture = SimpleFuture.Create<XsollaClientConfiguration, string>(out var promise);
             if (configuration.delayedTask != null)
             {
-                AwaitForConfiguration(configuration, promise);
+                XsollaDelayedConfiguration.Resolve(configuration, RunOnStartThread.Run, promise, Tag);
             }
             else
                 promise.Complete(configuration);
         }
-        
-        private async void AwaitForConfiguration(XsollaClientConfiguration configuration, ISimplePromise<XsollaClientConfiguration, string> promise)
-        {
-            var mapper = await configuration.delayedTask;
-            RunOnStartThread.Run(() => promise.Complete(mapper(configuration)));
-        }
 
         /// <summary>
         /// Initializes the store client and fetches products.
+        /// <para/>
+        /// Answers <paramref name="completionHandler"/> once, also with an error when the configuration can't be
+        /// resolved (a delayed configuration task that fails, or a mapper that throws or returns null) or the store
+        /// client throws while initializing or fetching the products before it answers.
         /// </summary>
         /// <param name="completionHandler">Callback with products array and error.</param>
         public void Initialize(Action<XsollaStoreClientProduct[], XsollaStoreClientError> completionHandler) =>
@@ -100,6 +100,15 @@ namespace Xsolla.SDK.Store
 
         /// <summary>
         /// Internal initialization logic.
+        /// <para/>
+        /// A store client that throws before answering, while initializing or fetching the products, answers
+        /// <paramref name="completionHandler"/> with an "initialization failed: " error, and the exception is logged and
+        /// passed to Unity as an exception whatever the SDK log level, as it may be thrown by the app's own restore
+        /// callback, which the client can run before answering. An exception after the answer, such as one the
+        /// completion handler throws, propagates unchanged.
+        /// <para/>
+        /// <paramref name="completionHandler"/> is answered once: a store client that reports its success after its
+        /// error, or after throwing, gets that success logged and ignored, without a product fetch or restore.
         /// </summary>
         /// <param name="configuration">Client configuration.</param>
         /// <param name="completionHandler">Callback with products array and error.</param>
@@ -108,34 +117,81 @@ namespace Xsolla.SDK.Store
         {
             XsollaLogger.Apply(configuration);
 
-            _storeImpl.Initialize(
-                configuration,
-                onSuccess: () =>
-                {
-                    _storeImpl.FetchProducts(_products.ToArray(),
-                        onSuccess: items =>
-                        {
-                            completionHandler?.Invoke(items, null);
+            var isAnswered = false;
 
+            bool Answer(XsollaStoreClientProduct[] products, XsollaStoreClientError error)
+            {
+                if (isAnswered)
+                {
+                    XsollaLogger.Warning(Tag, $"Initialize: already answered, ignored a later {(error == null ? "product list" : $"error: {error.message}")}");
+                    return false;
+                }
+                else
+                {
+                    isAnswered = true;
+                    completionHandler?.Invoke(products, error);
+                    return true;
+                }
+            }
+
+            void AnswerThrown(string thrower, Exception e)
+            {
+                XsollaLogger.Error(Tag, $"Initialize failed: {thrower} threw: {e}");
+                UnityEngine.Debug.LogException(e);
+                Answer(null, XsollaStoreClientError.Message($"initialization failed: {e.Message}"));
+            }
+
+            try
+            {
+                _storeImpl.Initialize(
+                    configuration,
+                    onSuccess: () =>
+                    {
+                        if (isAnswered)
+                        {
+                            XsollaLogger.Warning(Tag, "Initialize: the store client reported its success after initialization was answered, ignored it");
+                        }
+                        else
+                        {
+                            // A client may report its success after Initialize returned, past the guard around it.
+                            try
+                            {
+                                _storeImpl.FetchProducts(_products.ToArray(),
+                                    onSuccess: items =>
+                                    {
+                                        if (Answer(items, null))
+                                        {
 #if !UNITY_IOS
-                            // iOS restores automatically on start via the native SDK observer
-                            _storeImpl.RestorePurchases(
-                                onSuccess: restored =>
-                                {
-                                    foreach (var item in restored)
-                                        _onRestore?.Invoke(item, null);
-                                },
-                                onError: error => _onRestore?.Invoke(null, XsollaStoreClientHelpers.ParsePurchaseError(error))
-                            );
+                                            // iOS restores automatically on start via the native SDK observer
+                                            _storeImpl.RestorePurchases(
+                                                onSuccess: restored =>
+                                                {
+                                                    foreach (var item in restored)
+                                                        _onRestore?.Invoke(item, null);
+                                                },
+                                                onError: error => _onRestore?.Invoke(null, XsollaStoreClientHelpers.ParsePurchaseError(error))
+                                            );
 #endif
-                        },
-                        onError: error => completionHandler?.Invoke(null, XsollaStoreClientHelpers.ParsePurchaseError(error))
-                    );
-                },
-                onError: error => completionHandler?.Invoke(null, XsollaStoreClientHelpers.ParsePurchaseError(error)),
-                onSuccessPurchaseProduct: item => _onRestore?.Invoke(item, null),
-                onErrorPurchase: error => _onRestore?.Invoke(null, XsollaStoreClientHelpers.ParsePurchaseError(error))
-            );
+                                        }
+                                    },
+                                    onError: error => Answer(null, XsollaStoreClientHelpers.ParsePurchaseError(error))
+                                );
+                            }
+                            catch (Exception e) when (!isAnswered)
+                            {
+                                AnswerThrown("the product fetch", e);
+                            }
+                        }
+                    },
+                    onError: error => Answer(null, XsollaStoreClientHelpers.ParsePurchaseError(error)),
+                    onSuccessPurchaseProduct: item => _onRestore?.Invoke(item, null),
+                    onErrorPurchase: error => _onRestore?.Invoke(null, XsollaStoreClientHelpers.ParsePurchaseError(error))
+                );
+            }
+            catch (Exception e) when (!isAnswered)
+            {
+                AnswerThrown("the store client", e);
+            }
         }
 
         /// <summary>

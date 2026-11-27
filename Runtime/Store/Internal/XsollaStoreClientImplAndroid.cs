@@ -20,7 +20,19 @@ namespace Xsolla.SDK.Store
         {
             [NotNull] public readonly XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback stateListener;
             [NotNull] public readonly XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback paymentListener;
+
+            /// <summary>
+            /// Purchase requests waiting for the payment listener's result.
+            /// </summary>
+            [NotNull] public readonly XsollaPurchaseRequestQueue purchaseRequests;
+
             [NotNull] public readonly ISimpleFuture<bool, string> initializeFuture;
+
+            /// <summary>
+            /// Whether the session runs in <see cref="XsollaClientConfiguration.SimpleMode.WebShop"/> mode, where the bridge
+            /// opens the web shop for every purchase without a payment token, and the Android SDK reports no result of it.
+            /// </summary>
+            public readonly bool isWebShopMode;
 
             /// <summary>
             /// Purchase tokens of the session, null until the first purchase result or restore answer.
@@ -36,12 +48,38 @@ namespace Xsolla.SDK.Store
             public InitData(
                 [NotNull] XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback stateListener,
                 [NotNull] XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback paymentListener,
-                [NotNull] ISimpleFuture<bool, string> initializeFuture
+                [NotNull] XsollaPurchaseRequestQueue purchaseRequests,
+                [NotNull] ISimpleFuture<bool, string> initializeFuture,
+                bool isWebShopMode
             ) {
                 this.stateListener = stateListener;
                 this.paymentListener = paymentListener;
+                this.purchaseRequests = purchaseRequests;
                 this.initializeFuture = initializeFuture;
+                this.isWebShopMode = isWebShopMode;
             }
+
+            /// <summary>
+            /// Whether a purchase with <paramref name="args"/> opens the web shop, whose result the Android SDK never
+            /// reports. A purchase with a payment token runs the token flow even in WebShop mode.
+            /// </summary>
+            public bool IsWebShopPurchase(XsollaStoreClientPurchaseArgs args) =>
+                isWebShopMode && string.IsNullOrEmpty(args.paymentToken);
+        }
+
+        /// <summary>
+        /// Ends the session of <paramref name="initData"/>, if there is one: each purchase waiting for its result fails once
+        /// as <see cref="XsollaStoreClientPurchaseErrorCode.Aborted"/>, naming <paramref name="cause"/>, and the payment
+        /// results the session reports afterwards are dropped.
+        /// <para/>
+        /// The Android SDK drops the results of a session it deinitializes, so the waiting purchases would never get one.
+        /// A purchase paid meanwhile stays unconsumed, and the next session's restore delivers it.
+        /// </summary>
+        private static void EndSession([CanBeNull] InitData initData, string cause)
+        {
+            initData?.purchaseRequests.Close(XsollaClientHelpers.ToJson(
+                new XsollaStoreClientError($"Purchase aborted: {cause}", XsollaStoreClientPurchaseErrorCode.Aborted)
+            ));
         }
 
         #endregion
@@ -132,71 +170,93 @@ namespace Xsolla.SDK.Store
 
             RunOnStartThread.Create();
 
-            var stateListener = XsollaClientBridgeHelpersAndroid.CreateCommonListener("State Listener", (result, error) => {
+            XsollaClientCallback.CallbackDelegate onState = (result, error) => {
                 XsollaLogger.Debug(Tag, $"State Listener: {LogObfuscation.ObfuscateJsonIfEnabled(result)} {error}");
-            });
+            };
 
-            var paymentListener = XsollaClientBridgeHelpersAndroid.CreateCommonListener("Payment Listener" ,(result, error) => {
-                XsollaLogger.Debug(Tag, $"Payment Listener: common callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
+            var purchaseRequests = new XsollaPurchaseRequestQueue();
 
-                if (onSuccessPurchaseProduct != null || onErrorPurchase != null)
-                {
-                    RunOnStartThread.Run(() => {
-                        if (result != null)
-                        {
-                            XsollaLogger.Debug(Tag, $"Payment Listener: result={LogObfuscation.ObfuscateJsonIfEnabled(result)}");
-                            // Cached like a requested purchase, or `ConsumeProduct` meets a non-null cache
-                            // without it, fails as unknown, and the next restore grants the item again.
-                            var product = XsollaStoreClientHelpers.JsonToPurchase(result, null);
-                            AddReceiptToCache(product.transactionId, product.sku, product.receipt, restoredQuantity: 0);
-                            onSuccessPurchaseProduct?.Invoke(product);
-                        }
-                        else
-                        {
-                            XsollaClientBridgeHelpersAndroid.ReportError(Tag, $"Payment Listener: failed={error}");
-                            onErrorPurchase?.Invoke(error ?? string.Empty);
-                        }
-                    });
+            XsollaClientCallback.CallbackDelegate onPayment = (result, error) => {
+                if (!purchaseRequests.TryAnswer(result, error)) {
+                    XsollaLogger.Debug(Tag, $"Payment Listener: common callback fire result={LogObfuscation.ObfuscateJsonIfEnabled(result)} error={error}");
+
+                    if (onSuccessPurchaseProduct != null || onErrorPurchase != null)
+                    {
+                        RunOnStartThread.Run(() => {
+                            if (result != null)
+                            {
+                                XsollaLogger.Debug(Tag, $"Payment Listener: result={LogObfuscation.ObfuscateJsonIfEnabled(result)}");
+                                // Cached like a requested purchase, or `ConsumeProduct` meets a non-null cache
+                                // without it, fails as unknown, and the next restore grants the item again.
+                                var product = XsollaStoreClientHelpers.JsonToPurchase(result, null);
+                                AddReceiptToCache(product.transactionId, product.sku, product.receipt, restoredQuantity: 0);
+                                onSuccessPurchaseProduct?.Invoke(product);
+                            }
+                            else
+                            {
+                                XsollaClientBridgeHelpersAndroid.ReportError(Tag, $"Payment Listener: failed={error}");
+                                onErrorPurchase?.Invoke(error ?? string.Empty);
+                            }
+                        });
+                    }
                 }
-            });
+            };
             
             var initializeFuture = SimpleFuture.Create<bool, string>(out var promise);
 
-            m_InitData = new InitData(
-                stateListener,
-                paymentListener,
-                initializeFuture
-            );
-
-            XsollaClientBridgeHelpersAndroid.AddCommonListenerCallback(
-                stateListener,
-                "Initialize",
-                onSuccess: _ => {
-                    onSuccess?.Invoke();
-                    promise.Complete(true);
-                },
-                onError: error => {
-                    onError?.Invoke(error);
-                    promise.CompleteWithError(error);
-                }
-            );
-
-            var additionalSettings = AdditionalSettings.FromExtensions();
+            // A re-Initialize leaves the client not initialized until the new session's arguments are built, so a failure to
+            // build them fails its purchases as unavailable and its fetches and restores as not initialized.
+            var endedInitData = m_InitData;
+            m_InitData = null;
+            EndSession(endedInitData, "the store client was initialized again");
 
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "Initialize",
-                onError: error => onError?.Invoke(error),
-                XsollaClientHelpers.ConfigurationToJson(configuration),
-                XsollaClientHelpers.ToJson(additionalSettings),
-                stateListener,
-                paymentListener,
-                TryCreatePaymentEventCallback()
+                onError: error => {
+                    // The listener never answers a call that threw, so fetches and restores waiting on the future would hang.
+                    if (!initializeFuture.isCompleted)
+                        promise.CompleteWithError(error);
+                    onError?.Invoke(error);
+                },
+                args: () => {
+                    var configurationJson = XsollaClientHelpers.ConfigurationToJson(configuration);
+                    var additionalSettingsJson = XsollaClientHelpers.ToJson(AdditionalSettings.FromExtensions());
+                    var stateListener = XsollaClientBridgeHelpersAndroid.CreateCommonListener("State Listener", onState);
+                    var paymentListener = XsollaClientBridgeHelpersAndroid.CreateCommonListener("Payment Listener", onPayment);
+                    var paymentEventCallback = CreatePaymentEventCallback();
+
+                    m_InitData = new InitData(
+                        stateListener,
+                        paymentListener,
+                        purchaseRequests,
+                        initializeFuture,
+                        configuration.simpleMode == XsollaClientConfiguration.SimpleMode.WebShop
+                    );
+
+                    XsollaClientBridgeHelpersAndroid.AddCommonListenerCallback(
+                        stateListener,
+                        "Initialize",
+                        onSuccess: _ => {
+                            onSuccess?.Invoke();
+                            promise.Complete(true);
+                        },
+                        onError: error => {
+                            onError?.Invoke(error);
+                            promise.CompleteWithError(error);
+                        }
+                    );
+
+                    return new object[] {
+                        configurationJson, additionalSettingsJson, stateListener, paymentListener, paymentEventCallback
+                    };
+                }
             );
 
-            instances.Add(this);
+            if (!instances.Contains(this))
+                instances.Add(this);
 
 
-            XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback TryCreatePaymentEventCallback()
+            XsollaClientBridgeHelpersAndroid.XsollaUnityBridgeJsonCallback CreatePaymentEventCallback()
             {
                 const string TAG = "PaymentEventCallback";
 
@@ -256,34 +316,33 @@ namespace Xsolla.SDK.Store
 
                     XsollaClientBridgeHelpersAndroid.JavaCall(
                         method: "Restore",
-                        json: XsollaStoreClientHelpers.EmptyJson,
-                        callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "Restore",
-                            onSuccess: result => {
-                                if (initData != m_InitData) {
-                                    // Its ids and receipts belong to a session a re-Initialize or Deinitialize ended, and
-                                    // would land in the cache of the current one.
-                                    XsollaLogger.Debug(Tag, "Restore answered after the session it was sent in ended, dropped");
-                                    onError?.Invoke("Restore answered after the session it was sent in ended");
-                                } else {
-                                    // Native makes up an inventory unit's ids from its position, which the next unit takes
-                                    // over once it is consumed, so Unity IAP 4.x would finish that unit without granting it.
-                                    var products = initData.restoredTransactionIds.Assign(
-                                        restore,
-                                        XsollaStoreClientHelpers.JsonToRestoredItems(result)
-                                    );
+                        json: () => XsollaStoreClientHelpers.EmptyJson,
+                        logTag: "Restore",
+                        onSuccess: result => {
+                            if (initData != m_InitData) {
+                                // Its ids and receipts belong to a session a re-Initialize or Deinitialize ended, and
+                                // would land in the cache of the current one.
+                                XsollaLogger.Debug(Tag, "Restore answered after the session it was sent in ended, dropped");
+                                onError?.Invoke("Restore answered after the session it was sent in ended");
+                            } else {
+                                // Native makes up an inventory unit's ids from its position, which the next unit takes
+                                // over once it is consumed, so Unity IAP 4.x would finish that unit without granting it.
+                                var products = initData.restoredTransactionIds.Assign(
+                                    restore,
+                                    XsollaStoreClientHelpers.JsonToRestoredItems(result)
+                                );
 
-                                    foreach (var product in products) {
-                                        AddReceiptToCache(product.transactionId, product.sku, product.receipt, product.quantity);
-                                    }
-
-                                    onSuccess?.Invoke(products);
+                                foreach (var product in products) {
+                                    AddReceiptToCache(product.transactionId, product.sku, product.receipt, product.quantity);
                                 }
-                            },
-                            onError: error => {
-                                initData.restoredTransactionIds.OnRestoreFailed(restore);
-                                onError?.Invoke(error);
+
+                                onSuccess?.Invoke(products);
                             }
-                        )
+                        },
+                        onError: error => {
+                            initData.restoredTransactionIds.OnRestoreFailed(restore);
+                            onError?.Invoke(error);
+                        }
                     );
                 },
                 onError: error => onError?.Invoke(error)
@@ -308,11 +367,10 @@ namespace Xsolla.SDK.Store
                 {
                     XsollaClientBridgeHelpersAndroid.JavaCall(
                         method: "ProductsRequest",
-                        json: XsollaStoreClientHelpers.ProductIdsToJson(productIds),
-                        callback: XsollaClientBridgeHelpersAndroid.CreateCallback("ProductsRequest",
-                            onSuccess: result => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToProducts(result)),
-                            onError: error => onError?.Invoke(error)
-                        )
+                        json: () => XsollaStoreClientHelpers.ProductIdsToJson(productIds),
+                        logTag: "ProductsRequest",
+                        onSuccess: result => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToProducts(result)),
+                        onError: error => onError?.Invoke(error)
                     );
                 },
                 onError: error => onError?.Invoke(error)
@@ -325,18 +383,22 @@ namespace Xsolla.SDK.Store
 
         public void PurchaseProduct(string sku, string developerPayload, XsollaStoreClientPurchaseArgs args, PurchaseProductResultFunc onSuccess, ErrorFunc onError)
         {
-            var paymentListener = m_InitData?.paymentListener;
-            if (paymentListener == null)
+            var initData = m_InitData;
+            if (initData == null)
             {
                 XsollaClientBridgeHelpersAndroid.ReportError(Tag, "Payment listener is not initialized");
-                onError?.Invoke("Payment listener is not initialized");
+                onError?.Invoke(XsollaClientHelpers.ToJson(
+                    new XsollaStoreClientError("Payment listener is not initialized", XsollaStoreClientPurchaseErrorCode.Unknown)
+                    {
+                        reason = XsollaPurchasingFailureReason.PurchasingUnavailable
+                    }
+                ));
                 return;
             }
 
             var finalDeveloperPayload = args.developerPayload ?? developerPayload;
 
-            XsollaClientBridgeHelpersAndroid.AddCommonListenerCallback(
-                paymentListener,
+            var purchaseCallback = XsollaClientBridgeHelpersAndroid.CreateCommonListenerCallback(
                 "Purchase",
                 onSuccess: s => {
                     var product = XsollaStoreClientHelpers.JsonToPurchase(s, finalDeveloperPayload);
@@ -345,30 +407,58 @@ namespace Xsolla.SDK.Store
                 },
                 onError: error => {
                     onError?.Invoke(error);
-                },
-                onValidate: (result, error) => {
-                    XsollaLogger.Debug(Tag, $"Validate: {LogObfuscation.ObfuscateJsonIfEnabled(result)} {error}");
-                    return true;
                 }
             );
+
+            Action<string, string> answer = (result, error) => purchaseCallback(result, error);
+
+            // The Android SDK reports no web shop purchase, so a paid one arrives with the next restore, and only its start
+            // failing answers its request: the call below throwing, or the bridge reporting a failure naming its SKU.
+            var request = initData.IsWebShopPurchase(args)
+                ? initData.purchaseRequests.AddWithoutResult(sku, answer)
+                : initData.purchaseRequests.Add(sku, args.paymentToken, answer);
             
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "Purchase",
                 onError: error => {
-                    var msg = $"Purchase failed: {error}";
-                    XsollaClientBridgeHelpersAndroid.ReportError(Tag, msg);
-                    onError?.Invoke(error);
+                    // The purchase never started, so no payment result belongs to it. One that answered it meanwhile
+                    // was its only answer.
+                    if (initData.purchaseRequests.Remove(request)) {
+                        var msg = $"Purchase failed: {error}";
+                        XsollaClientBridgeHelpersAndroid.ReportError(Tag, msg);
+                        // The bridge throws before any UI, such as when its billing client is not ready.
+                        onError?.Invoke(XsollaClientHelpers.ToJson(
+                            new XsollaStoreClientError(error, XsollaStoreClientPurchaseErrorCode.Unknown)
+                            {
+                                reason = XsollaPurchasingFailureReason.PurchasingUnavailable
+                            }
+                        ));
+                    } else {
+                        XsollaLogger.Warning(Tag, $"Purchase failed to start after a payment result answered it: {error}");
+                    }
                 },
-                XsollaStoreClientHelpers.PurchaseToJson(sku,
-                    finalDeveloperPayload,
-                    args.externalId, args.paymentToken,
-                    args.paymentMethodId,
+                args: () => new object[] {
+                    XsollaStoreClientHelpers.PurchaseToJson(sku,
+                        finalDeveloperPayload,
+                        args.externalId, args.paymentToken,
+                        args.paymentMethodId,
 #pragma warning disable CS0618 // Type or member is obsolete
-                    args.allowTokenOnlyFinishedStatusWithoutOrderId,
+                        args.allowTokenOnlyFinishedStatusWithoutOrderId,
 #pragma warning restore CS0618 // Type or member is obsolete
-                    args.externalTransactionToken
-                )
+                        args.externalTransactionToken
+                    )
+                }
             );
+        }
+
+        /// <summary>
+        /// False for a web shop purchase, which only its start failure answers; a purchase before initialization is
+        /// answered at once with an error.
+        /// </summary>
+        public bool CanAnswerPurchase(string sku, XsollaStoreClientPurchaseArgs args)
+        {
+            var initData = m_InitData;
+            return initData == null || !initData.IsWebShopPurchase(args);
         }
 
         #endregion
@@ -406,14 +496,13 @@ namespace Xsolla.SDK.Store
                     quantity,
                     consumeWithToken: receipt => XsollaClientBridgeHelpersAndroid.JavaCall(
                         method: "Consume",
-                        json: XsollaStoreClientHelpers.ConsumeToJson(sku, quantity, transactionId, receipt),
-                        callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "Consume",
-                            onSuccess: _ => {
-                                markConsumed();
-                                onSuccess.Invoke();
-                            },
-                            onError: onConsumeError
-                        )
+                        json: () => XsollaStoreClientHelpers.ConsumeToJson(sku, quantity, transactionId, receipt),
+                        logTag: "Consume",
+                        onSuccess: _ => {
+                            markConsumed();
+                            onSuccess.Invoke();
+                        },
+                        onError: onConsumeError
                     ),
                     onSuccess: () => onSuccess.Invoke(),
                     onError: error => onError?.Invoke(error)
@@ -467,11 +556,10 @@ namespace Xsolla.SDK.Store
         {
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "Validate",
-                json: receiptJson,
-                callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "Validate",
-                    onSuccess: json => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToValidate(json)),
-                    onError: error => onError?.Invoke(error)
-                )
+                json: () => receiptJson,
+                logTag: "Validate",
+                onSuccess: json => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToValidate(json)),
+                onError: error => onError?.Invoke(error)
             );
         }
 
@@ -483,15 +571,16 @@ namespace Xsolla.SDK.Store
         {
             instances.Remove(this);
 
+            var endedInitData = m_InitData;
             m_InitData = null;
+            EndSession(endedInitData, "the store client was deinitialized");
 
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "Deinitialize",
-                json: XsollaStoreClientHelpers.EmptyJson,
-                callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "Deinitialize",
-                    onSuccess: _ => onSuccess.Invoke(),
-                    onError: error => onError?.Invoke(error)
-                )
+                json: () => XsollaStoreClientHelpers.EmptyJson,
+                logTag: "Deinitialize",
+                onSuccess: _ => onSuccess?.Invoke(),
+                onError: error => onError?.Invoke(error)
             );
        }
 
@@ -502,11 +591,10 @@ namespace Xsolla.SDK.Store
         {
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "GetAccessToken",
-                json: XsollaStoreClientHelpers.EmptyJson,
-                callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "GetAccessToken",
-                    onSuccess: json => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToToken(json)),
-                    onError: error => onError?.Invoke(error)
-                )
+                json: () => XsollaStoreClientHelpers.EmptyJson,
+                logTag: "GetAccessToken",
+                onSuccess: json => onSuccess?.Invoke(XsollaStoreClientHelpers.JsonToToken(json)),
+                onError: error => onError?.Invoke(error)
             );
         }
 
@@ -514,11 +602,10 @@ namespace Xsolla.SDK.Store
         {
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "UpdateAccessToken",
-                json: token,
-                callback: XsollaClientBridgeHelpersAndroid.CreateCallback( "UpdateAccessToken",
-                    onSuccess: _ => onSuccess?.Invoke(),
-                    onError: error => onError?.Invoke(error)
-                )
+                json: () => token,
+                logTag: "UpdateAccessToken",
+                onSuccess: _ => onSuccess?.Invoke(),
+                onError: error => onError?.Invoke(error)
             );
         }
 
@@ -563,8 +650,8 @@ namespace Xsolla.SDK.Store
 
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "CancelActivePurchase",
-                json: XsollaStoreClientHelpers.EmptyJson,
-                callback: XsollaClientBridgeHelpersAndroid.Dummy
+                onError: null,
+                args: () => new object[] { XsollaStoreClientHelpers.EmptyJson, XsollaClientBridgeHelpersAndroid.Dummy }
             );
         }
     }

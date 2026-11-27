@@ -39,7 +39,11 @@ Xsolla Mobile SDK provides a Unity IAP-compatible purchasing module for in-game 
 ## Requirements
 
 - Unity 2022.3 LTS or later
-- Unity IAP (`com.unity.purchasing`) 4.13.0+ (5.x is not supported)
+- Unity IAP (`com.unity.purchasing`) 4.15.1 or a later 4.x release
+
+With Unity IAP 5.x the SDK compiles, but its Unity IAP integration (`XsollaPurchasingModule`) is disabled, and the editor logs a warning once per session. Make purchases through `XsollaStoreClient` instead, or stay on Unity IAP 4.x.
+
+To leave out the Unity IAP integration on any version, add `XSOLLA_SDK_UNITY_PURCHASING_DISABLE` to **Project Settings > Player > Scripting Define Symbols**. This also silences the warning.
 
 ## Installation
 
@@ -52,6 +56,10 @@ Add the package via Unity Package Manager using the Git URL:
    https://github.com/xsolla/xsolla-sdk-unity.git
    ```
 4. Click **Add**
+
+On Android, the External Dependency Manager for Unity (EDM4U) resolves the SDK's native dependencies. In a new project, its Android Resolver can fail with a `DirectoryNotFoundException` (seen with EDM4U 1.2.190) until the `Assets/Plugins/Android` folder exists. The SDK creates the folder whenever the editor loads or switches to Android, batch mode included. If the resolution ran with another build target active, run **Assets > External Dependency Manager > Android Resolver > Force Resolve** once more.
+
+On Windows, macOS and WebGL, turn on **Run In Background** (**Project Settings > Player > Resolution and Presentation**). The payment UI takes the focus, and with the setting off Unity pauses and the SDK stops tracking the order until the game gets the focus back. On WebGL, closing the payment UI in that state can report a paid purchase as cancelled; it is then delivered by the next purchase restore.
 
 ## Quick Start
 

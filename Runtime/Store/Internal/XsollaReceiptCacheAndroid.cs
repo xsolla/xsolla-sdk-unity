@@ -88,9 +88,9 @@ namespace Xsolla.SDK.Store
         /// purchase result delivered again for its order, or a restored row in the answer of a restore sent before the
         /// consume succeeded, carrying the consumed unit read before the consume took effect or a held unit moved onto
         /// its id. Were the line pending again, a consume repeated for its transaction would spend another held unit of
-        /// the SKU. <c>XsollaPurchasingStore</c> drops such a restored row and absorbs repeated finishes on the Unity
-        /// IAP paths, so this guards integrators calling <see cref="XsollaStoreClient.ConsumeProduct"/> directly, and
-        /// is defence in depth under <c>XsollaPurchasingStore</c>.
+        /// the SKU. <see cref="XsollaPurchasingCore"/> drops such a restored row and absorbs repeated finishes on the
+        /// Unity IAP paths, so this guards integrators calling <see cref="XsollaStoreClient.ConsumeProduct"/> directly,
+        /// and is defence in depth under the core.
         /// </summary>
         /// <param name="restoredQuantity">The units a restored row holds, or zero for a purchase result.</param>
         public void Add(string transactionId, string sku, string receipt, int restoredQuantity)
@@ -164,7 +164,7 @@ namespace Xsolla.SDK.Store
                 onError($"Consumption failed due to the unknown purchase: transactionId={transactionId} sku={sku}");
             } else if (entry is ReceiptEntry.Consumed) {
                 // A repeated consume succeeds without a native consume, which would spend another held unit of
-                // the SKU. On the Unity IAP paths `XsollaPurchasingStore` absorbs repeated finishes before they get here.
+                // the SKU. On the Unity IAP paths the core absorbs repeated finishes before they get here.
                 XsollaLogger.Debug(Tag, $"[ConsumeProduct] Already consumed this session, ignoring duplicate (sku={sku} transactionId={transactionId}).");
                 onSuccess();
             } else if (entry is ReceiptEntry.Refused) {

@@ -18,10 +18,12 @@ namespace Xsolla.SDK.Store
     /// <para/>
     /// The units of a SKU are interchangeable, so its ids form an ordered list: the row at position <c>i</c> takes the
     /// <c>i</c>th id, and a consumed id leaves the list. A repeated restore reports the units still held under the same
-    /// ids, which the dedup of <c>XsollaPurchasingStore</c> drops; a new session starts with no list, so a unit granted
-    /// and not consumed before the app quit is granted again: a duplicate, never a loss. A non-consumable gets an id
-    /// too, and <c>XsollaPurchasingStore</c> puts back the one Unity IAP's transaction log holds for it: the transaction
-    /// id of the purchase it recorded for the holding, or else the native id.
+    /// ids, which the dedup of <see cref="XsollaPurchasingCore"/> drops; a new session starts with no list, so a unit
+    /// granted and not consumed before the app quit is granted again: a duplicate, never a loss. A non-consumable gets an
+    /// id too, and for a Unity IAP line that needs it
+    /// (<see cref="XsollaPurchasingCoreOptions.restoresNonConsumablesUnderNativeIds"/>) the core puts back the one Unity
+    /// IAP's transaction log holds for it: the transaction id of the purchase it recorded for the holding, or else the
+    /// native id.
     /// </summary>
     internal sealed class XsollaRestoredTransactionIdsAndroid
     {

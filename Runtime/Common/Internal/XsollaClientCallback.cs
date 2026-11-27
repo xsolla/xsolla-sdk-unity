@@ -36,10 +36,10 @@ namespace Xsolla.SDK.Common
             }
 
             lock (_callbacks) {
-                _callbacks.Enqueue(callback);    
+                _callbacks.Enqueue(callback);
             }
         }
-        
+
         public void RunAndDequeueCallbacks([CanBeNull] string result, [CanBeNull] string error)
         {
             XsollaLogger.Debug(Tag, $"RunAndDequeueCallbacks {LogObfuscation.ObfuscateJsonIfEnabled(result)} {error}");
@@ -80,14 +80,15 @@ namespace Xsolla.SDK.Common
     }
 
     internal static class XsollaClientCallbackExt {
-        public static void AddListenerCallback(
-            this XsollaClientCallback listener,
-            string tag, 
+        /// <summary>
+        /// Creates a callback that answers a result through <paramref name="onSuccess"/> or <paramref name="onError"/> on the
+        /// start thread, unless <paramref name="onValidate"/> rejects it.
+        /// </summary>
+        public static XsollaClientCallback.ListenerDelegate CreateListenerCallback(
+            string tag,
             string name, Action<string> onSuccess, Action<string> onError,
             [CanBeNull] XsollaClientCallback.ListenerDelegate onValidate = default
-        )
-        {
-            listener.AddCallback((result, error) =>
+        ) => (result, error) =>
             {
                 XsollaLogger.Debug(tag,$"{name} callback fire");
 
@@ -129,7 +130,17 @@ namespace Xsolla.SDK.Common
                 });
 
                 return true;
-            });
-        }
+            };
+
+        /// <summary>
+        /// Queues a callback that answers the next result of <paramref name="listener"/> through
+        /// <paramref name="onSuccess"/> or <paramref name="onError"/>.
+        /// </summary>
+        public static void AddListenerCallback(
+            this XsollaClientCallback listener,
+            string tag,
+            string name, Action<string> onSuccess, Action<string> onError,
+            [CanBeNull] XsollaClientCallback.ListenerDelegate onValidate = default
+        ) => listener.AddCallback(CreateListenerCallback(tag, name, onSuccess, onError, onValidate));
     }
 }

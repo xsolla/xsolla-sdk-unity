@@ -17,6 +17,17 @@
     "defineConstraints": [
         "!XSOLLA_SDK_DISABLE"
     ],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.purchasing",
+            "expression": "[0.0.0,4.13.0)",
+            "define": "XSOLLA_SDK_UIAP_PRE_4_13"
+        },
+        {
+            "name": "com.unity.purchasing",
+            "expression": "5.0.0",
+            "define": "XSOLLA_SDK_UIAP_5_OR_LATER"
+        }
+    ],
     "noEngineReferences": false
 }

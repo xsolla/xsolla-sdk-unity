@@ -1,6 +1,7 @@
 ﻿using JetBrains.Annotations;
 using Xsolla.SDK.Common;
 using Xsolla.SDK.Utils;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Xsolla.SDK.Store
@@ -99,15 +100,17 @@ namespace Xsolla.SDK.Store
         /// <summary>
         /// Parses an error string from a platform implementation. Named for purchases, where it
         /// started, but the shape is the same for every native error — a catalog fetch that failed
-        /// sends it too — and anything that isn't this JSON is kept as the message verbatim.
+        /// sends it too — and anything that isn't this JSON is kept as the message verbatim. So is an error JSON
+        /// without a message, though its code and the rest are still read.
         /// </summary>
         public static XsollaStoreClientError ParsePurchaseError(string error)
         {
             if (string.IsNullOrEmpty(error))
                 return new XsollaStoreClientError("Unknown error!", XsollaStoreClientPurchaseErrorCode.Unknown);
 
-            // Try JSON shape: { message: "...", code: "Cancelled" | 4, statusCode: 422, errorCode: 1006 }
-            // statusCode/errorCode are there only when an Xsolla API response is what failed.
+            // Try JSON shape: { message: "...", code: "Cancelled" | 4, statusCode: 422, errorCode: 1006, reason: "ProductUnavailable" }
+            // statusCode/errorCode are there only when an Xsolla API response is what failed; reason only when the
+            // platform client could classify the failure.
             try
             {
                 var token = JToken.Parse(string.IsNullOrWhiteSpace(error) ? "{}" : error);
@@ -138,13 +141,13 @@ namespace Xsolla.SDK.Store
                         }
                     }
 
-                    if (!string.IsNullOrEmpty(message))
-                        return new XsollaStoreClientError(message, code)
-                        {
-                            statusCode = ReadInt(obj["statusCode"]),
-                            errorCode = ReadInt(obj["errorCode"]),
-                            errorMessage = ReadString(obj["errorMessage"]),
-                        };
+                    return new XsollaStoreClientError(string.IsNullOrEmpty(message) ? error : message, code)
+                    {
+                        statusCode = ReadInt(obj["statusCode"]),
+                        errorCode = ReadInt(obj["errorCode"]),
+                        errorMessage = ReadString(obj["errorMessage"]),
+                        reason = ReadReason(obj["reason"]),
+                    };
                 }
             }
             catch { /* not a JSON, fall back to message */ }
@@ -157,5 +160,42 @@ namespace Xsolla.SDK.Store
 
         /// <summary>Reads an optional string field, as null when it is absent or isn't a string.</summary>
         private static string ReadString(JToken token) => token?.Type == JTokenType.String ? (string)token : null;
+
+        /// <summary>
+        /// Reads the optional failure reason, as null when it is absent, isn't a string or isn't exactly a value's name:
+        /// a number, even in a string, is never read as one, since the values are not part of the error JSON.
+        /// <see cref="XsollaPurchasingFailureReason.UserCancelled"/> is read as null too: only the cancel code makes a
+        /// cancel, so a tag alone never does.
+        /// </summary>
+        private static XsollaPurchasingFailureReason? ReadReason(JToken token)
+        {
+            var name = ReadString(token);
+            return name != null
+                && name != nameof(XsollaPurchasingFailureReason.UserCancelled)
+                && System.Enum.IsDefined(typeof(XsollaPurchasingFailureReason), name)
+                ? (XsollaPurchasingFailureReason?) System.Enum.Parse(typeof(XsollaPurchasingFailureReason), name)
+                : null;
+        }
+
+#nullable disable
+        /// <summary>
+        /// Writes an optional failure reason as its name and reads one as <see cref="ParsePurchaseError"/> does, so
+        /// reading a reason the SDK doesn't know, or a value that is no name at all, gives null instead of throwing.
+        /// <para/>
+        /// Preserved because Newtonsoft creates it by reflection, from the attribute alone, which managed code
+        /// stripping cannot see.
+        /// </summary>
+        [UnityEngine.Scripting.Preserve]
+        internal sealed class FailureReasonConverter : JsonConverter
+        {
+            public override bool CanConvert(System.Type objectType) => objectType == typeof(XsollaPurchasingFailureReason?);
+
+            public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer) =>
+                writer.WriteValue(value?.ToString());
+
+            public override object ReadJson(JsonReader reader, System.Type objectType, object existingValue, JsonSerializer serializer) =>
+                ReadReason(JToken.Load(reader));
+        }
+#nullable restore
     }
 }

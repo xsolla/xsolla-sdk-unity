@@ -291,6 +291,8 @@ namespace Xsolla.SDK.Store
                 )
             );
         }
+
+        public bool CanAnswerPurchase(string sku, XsollaStoreClientPurchaseArgs args) => true;
         
         #endregion
 

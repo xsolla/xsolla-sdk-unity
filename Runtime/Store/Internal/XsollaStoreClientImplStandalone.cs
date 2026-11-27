@@ -38,9 +38,24 @@ namespace Xsolla.SDK.Store
 
         private PurchaseProductResultFunc onUnorderedPurchaseProduct;
 
+        /// <summary>
+        /// Guards <see cref="_sessionPurchases"/>: purchases start on the caller's thread, while the plain .NET SDK can end
+        /// the session on another.
+        /// </summary>
+        private readonly object _sessionPurchasesLock = new object();
+
+        /// <summary>
+        /// The answers of the purchases started in the current session, answered ones included, which
+        /// <see cref="EndSession"/> closes. Replaced when the session ends.
+        /// <para/>
+        /// An answered purchase stays listed because its tracker's status request can still report a payment after the
+        /// time limit failed it, which must not reach the purchases without a request once the session has ended.
+        /// </summary>
+        private List<XsollaPurchaseAnswer> _sessionPurchases = new List<XsollaPurchaseAnswer>();
+
         private List<string> _products = new List<string>();
 
-        // Bumped on Deinitialize so a product fetch (or its retry) that resolves after teardown is
+        // Bumped when a session ends so a product fetch (or its retry) that resolves after it is
         // dropped instead of re-poisoning the cleared dedup set or completing an abandoned promise.
         private int _productsGeneration;
 
@@ -64,6 +79,10 @@ namespace Xsolla.SDK.Store
             PurchaseProductResultFunc onSuccessPurchaseProduct, ErrorFunc onErrorPurchase
         ) {
             XsollaLogger.Debug(Tag, $"Initialize: {LogObfuscation.ObfuscateJsonIfEnabled(XsollaClientHelpers.ConfigurationToJson(configuration))}");
+
+            // The first Initialize ends no session: purchases started before it wait for it and belong to its session.
+            if (_settings != null)
+                EndSession("the store client was initialized again");
 
             this.configuration = configuration;
             _settings = FillFromConfiguration(configuration);
@@ -280,19 +299,48 @@ namespace Xsolla.SDK.Store
         
         public void PurchaseProduct(string sku, string developerPayload, XsollaStoreClientPurchaseArgs args, PurchaseProductResultFunc onSuccess, ErrorFunc onError)
         {
+            var answer = XsollaPurchaseAnswer.Of(
+                onSuccess,
+                onError,
+                onPurchaseWithoutRequest: product => onUnorderedPurchaseProduct?.Invoke(product)
+            );
+            lock (_sessionPurchasesLock)
+                _sessionPurchases.Add(answer);
+
             Authenticate(
                 onSuccess: exists =>
                 {
                     if (!exists)
                     {
-                        onError?.Invoke(Error.UnknownError.ToString());
+                        answer.Fail(EncodePurchaseError(Error.UnknownError, isBeforePaymentUi: true));
                         return;
                     }
 
-                    PurchaseProduct_(sku, developerPayload, args, onSuccess, onError);
+                    PurchaseProduct_(sku, developerPayload, args, answer.Succeed, answer.Fail);
                 },
-                onError: error => onError?.Invoke(error.ToString())
+                onError: error => answer.Fail(EncodePurchaseError(error, isBeforePaymentUi: true))
             );
+        }
+
+        /// <summary>
+        /// False for a web shop purchase without the Events API, which nothing tracks
+        /// (<see cref="XsollaCatalog.PurchaseWithWebshop"/>), so only a later restore reports its payment.
+        /// <para/>
+        /// A purchase with a payment token goes to Pay Station instead, and a purchase that fails to start, such as one
+        /// before initialization, with an external transaction token, or with no web shop URL or user id, is answered at
+        /// once with an error. The Events API is on exactly when <see cref="XsollaSettings.EventApiEnabled"/> is, as
+        /// <see cref="FillFromConfiguration"/> sets it from the same configuration.
+        /// </summary>
+        public bool CanAnswerPurchase(string sku, XsollaStoreClientPurchaseArgs args)
+        {
+            var config = configuration;
+            return config == null
+                || config.simpleMode != XsollaClientConfiguration.SimpleMode.WebShop
+                || !string.IsNullOrEmpty(args?.paymentToken)
+                || !string.IsNullOrEmpty(args?.externalTransactionToken)
+                || config.settings.webhooksMode == XsollaClientSettings.WebhooksMode.EventsApi
+                || string.IsNullOrEmpty(config.settings.webShopUrl)
+                || string.IsNullOrEmpty(config.userId);
         }
 
         private void PurchaseProduct_(string sku, string developerPayload, XsollaStoreClientPurchaseArgs args, PurchaseProductResultFunc onSuccess, ErrorFunc onError)
@@ -320,7 +368,7 @@ namespace Xsolla.SDK.Store
 
             if (!string.IsNullOrEmpty(args?.externalTransactionToken))
             {
-                onError?.Invoke($"External transaction token is not supported on this platform ({Application.platform})");
+                FailToStart($"External transaction token is not supported on this platform ({Application.platform})");
                 return;
             }
 
@@ -345,35 +393,50 @@ namespace Xsolla.SDK.Store
                         _settings,
                         paymentToken: args.paymentToken,
                         onSuccess: OnSuccess,
-                        onError: error => onError?.Invoke(error.ToString()),
+                        onError: error => onError?.Invoke(EncodePurchaseError(error, isBeforePaymentUi: false)),
                         purchaseParams: purchaseParams
                     );
                 }
                 else
                 {
-                    onError?.Invoke("[PurchaseProduct] No payment token provided for `ServerTokens`");
+                    FailToStart("[PurchaseProduct] No payment token provided for `ServerTokens`");
                 }
             }
             else if (configuration.simpleMode == XsollaClientConfiguration.SimpleMode.WebShop)
             {
-                XsollaCatalog.PurchaseWithWebshop(
-                    _settings,
-                    itemSku: sku,
-                    webshopUrl: configuration.settings.webShopUrl,
-                    userId: configuration.userId,
-                    redirectUrl: configuration.settings.redirectSettings.redirectUrl,
-                    onSuccess: OnSuccess,
-                    onError: error => onError?.Invoke(error.ToString()),
-                    purchaseParams: purchaseParams
-                );
+                // Fails here, before the payment UI starts, with the reason PurchasingUnavailable. Without this check the purchase
+                // would fail later, after the payment UI started, with the reason Unknown.
+                if (string.IsNullOrEmpty(configuration.settings.webShopUrl))
+                {
+                    FailToStart("Webshop URL is empty.");
+                }
+                else if (string.IsNullOrEmpty(configuration.userId))
+                {
+                    FailToStart("Webshop User Id is empty.");
+                }
+                else
+                {
+                    XsollaCatalog.PurchaseWithWebshop(
+                        _settings,
+                        itemSku: sku,
+                        webshopUrl: configuration.settings.webShopUrl,
+                        userId: configuration.userId,
+                        redirectUrl: configuration.settings.redirectSettings.redirectUrl,
+                        onSuccess: OnSuccess,
+                        onError: error => onError?.Invoke(EncodePurchaseError(error, isBeforePaymentUi: false)),
+                        purchaseParams: purchaseParams
+                    );
+                }
             }
             else
             {
+                var isOrderCreated = false;
                 XsollaCatalog.Purchase(
                     _settings,
                     itemSku: sku,
                     onSuccess: OnSuccess,
-                    onError: error => onError?.Invoke(error.ToJson()),
+                    onError: error => onError?.Invoke(EncodePurchaseError(error, isBeforePaymentUi: !isOrderCreated)),
+                    onOrderCreated: _ => isOrderCreated = true,
                     onBrowseClosed: null,
                     purchaseParams: purchaseParams
                 );
@@ -422,8 +485,51 @@ namespace Xsolla.SDK.Store
             {
                 return purchaseParams ??= new PurchaseParams();
             }
+
+            void FailToStart(string message)
+            {
+                onError?.Invoke(XsollaClientHelpers.ToJson(
+                    new XsollaStoreClientError(message, XsollaStoreClientPurchaseErrorCode.Unknown)
+                    {
+                        reason = XsollaPurchasingFailureReason.PurchasingUnavailable
+                    }
+                ));
+            }
         }
-        
+
+        /// <summary>
+        /// Encodes a purchase failure as the error JSON that <see cref="XsollaStoreClientHelpers.ParsePurchaseError"/> reads:
+        /// <see cref="Error.ToString"/> as the message, the Xsolla API response's status code, error code and message when
+        /// there was one, and a code that only a cancel, a refused authorization and an abort get: every other failure is
+        /// <see cref="XsollaStoreClientPurchaseErrorCode.Unknown"/>.
+        /// <para/>
+        /// A failure before the payment UI also gets a reason: the product is unavailable when the catalog doesn't have
+        /// it, else purchasing is. A cancel keeps its code, which the purchasing core reports over any reason. After the
+        /// payment UI the error type no longer tells what failed, so there is no reason.
+        /// </summary>
+        internal static string EncodePurchaseError(Error error, bool isBeforePaymentUi)
+        {
+            var code = error.ErrorType switch
+            {
+                ErrorType.UserCancelled => XsollaStoreClientPurchaseErrorCode.Cancelled,
+                ErrorType.Unauthorized => XsollaStoreClientPurchaseErrorCode.Unauthorized,
+                ErrorType.Aborted => XsollaStoreClientPurchaseErrorCode.Aborted,
+                _ => XsollaStoreClientPurchaseErrorCode.Unknown
+            };
+
+            return XsollaClientHelpers.ToJson(new XsollaStoreClientError(error.ToString(), code)
+            {
+                statusCode = int.TryParse(error.statusCode, NumberStyles.Integer, CultureInfo.InvariantCulture, out var statusCode) ? statusCode : 0,
+                errorCode = int.TryParse(error.errorCode, NumberStyles.Integer, CultureInfo.InvariantCulture, out var errorCode) ? errorCode : 0,
+                errorMessage = error.errorMessage,
+                reason = isBeforePaymentUi
+                    ? error.ErrorType == ErrorType.ProductDoesNotExist
+                        ? XsollaPurchasingFailureReason.ProductUnavailable
+                        : XsollaPurchasingFailureReason.PurchasingUnavailable
+                    : (XsollaPurchasingFailureReason?)null,
+            });
+        }
+
         public void ConsumeProduct(string sku, int quantity, string transactionId, ConsumeProductResultFunc onSuccess, ErrorFunc onError)
         {
             Authenticate(
@@ -549,11 +655,58 @@ namespace Xsolla.SDK.Store
 
         public void Deinitialize(DeinitializeResultFunc onSuccess, ErrorFunc onError)
         {
+            EndSession("the store client was deinitialized");
+
+            onSuccess?.Invoke();
+        }
+
+        /// <summary>
+        /// Ends the current session: forgets its sign-in and its loaded products, so the next session signs in with its own
+        /// settings and fetches its products again, stops tracking its orders, then fails each of its purchases still
+        /// waiting once as <see cref="XsollaStoreClientPurchaseErrorCode.Aborted"/>, naming <paramref name="cause"/>, as a
+        /// cancelled order tracking does (<see cref="OrderTrackingService.CancelOrderFromTracking"/>), and drops every
+        /// result its purchases report afterwards.
+        /// <para/>
+        /// Its trackers are told apart by the session's settings, a new instance per Initialize
+        /// (<see cref="FillFromConfiguration"/>), so another client's trackers stay tracked. A paid purchase is not lost: it
+        /// stays in the inventory or among the unprocessed events, and the next session's restore delivers it. A purchase
+        /// whose order is still being created starts its tracker afterwards, which polls to its time limit and whose result
+        /// is dropped.
+        /// </summary>
+        private void EndSession(string cause)
+        {
             _authTokenFuture = null;
             _products.Clear();
             _productsGeneration++;
 
-            onSuccess?.Invoke();
+            List<XsollaPurchaseAnswer> purchases;
+            lock (_sessionPurchasesLock)
+            {
+                purchases = _sessionPurchases;
+                _sessionPurchases = new List<XsollaPurchaseAnswer>();
+            }
+
+            // Removed first, so a removed tracker drops its failures. A payment read by a status request already in flight
+            // still answers its purchase if it lands before the close, and is dropped after it: either way, once.
+            if (_settings != null)
+                OrderTrackingService.RemoveSessionOrdersFromTracking(_settings);
+
+            var error = EncodePurchaseError(
+                new Error(ErrorType.Aborted, errorMessage: $"Order tracking stopped: {cause}."),
+                isBeforePaymentUi: false
+            );
+            XsollaLogger.Debug(Tag, $"Session ended ({cause}): {purchases.Count} purchases closed");
+            foreach (var purchase in purchases)
+            {
+                try
+                {
+                    purchase.Close(error);
+                }
+                catch (Exception e)
+                {
+                    XsollaLogger.Error(Tag, $"Failure handler of a purchase threw while its session ended: {e}");
+                }
+            }
         }
 
         public void GetAccessToken(GetAccessTokenResultFunc onSuccess, ErrorFunc onError)
@@ -619,12 +772,15 @@ namespace Xsolla.SDK.Store
             
             XsollaLogger.Debug(Tag, $"Authenticate");
             
+            // The session's own settings, so a sign-in still running when the session ends never signs in the next one.
+            var settings = _settings;
+            var socialProvider = configuration.settings.socialProvider;
             var future = SimpleFuture.Create<bool, Error>(out var promise);
 
             _authTokenFuture = future;
 
             XsollaAuth.AuthViaXsollaLauncher(
-                _settings,
+                settings,
                 onSuccess: () =>
                 {
                     XsollaLogger.Debug(Tag, "Authenticate Via Launcher onSuccess");
@@ -635,7 +791,7 @@ namespace Xsolla.SDK.Store
                     XsollaLogger.Debug(Tag, $"Authenticate Via Launcher onError {error}, trying to auth by saved token");
                     
                     XsollaAuth.AuthBySavedToken(
-                        _settings,
+                        settings,
                         onSuccess: () =>
                         {
                             XsollaLogger.Debug(Tag, "Authenticate By Saved Token onSuccess");
@@ -643,9 +799,9 @@ namespace Xsolla.SDK.Store
                         },
                         onError: error =>
                         {
-                            if (configuration.settings.socialProvider.HasValue)
+                            if (socialProvider.HasValue)
                             {
-                                var settingsSocialProvider = configuration.settings.socialProvider.Value;
+                                var settingsSocialProvider = socialProvider.Value;
 
                                 XsollaLogger.Debug(Tag, "Trying to authenticate using the social access token:\n" +
                                     $"  Provider={settingsSocialProvider.name}\n" +
@@ -653,7 +809,7 @@ namespace Xsolla.SDK.Store
                                 );
 
                                 XsollaAuth.AuthWithSocialNetworkAccessToken(
-                                    _settings,
+                                    settings,
                                     accessToken: settingsSocialProvider.accessToken,
                                     accessTokenSecret: null,
                                     openId: null,
@@ -663,7 +819,7 @@ namespace Xsolla.SDK.Store
                                         XsollaLogger.Debug(Tag, $"Successfully authenticated using the social access token (" +
                                             $"provider={settingsSocialProvider.name} " +
                                             $"accessToken={LogRedaction.Tail(settingsSocialProvider.accessToken)}" +
-                                            $"):\n{LogRedaction.Tail(_settings.XsollaToken.AccessToken)}"
+                                            $"):\n{LogRedaction.Tail(settings.XsollaToken.AccessToken)}"
                                         );
 
                                         promise.Complete(true);
@@ -699,7 +855,7 @@ namespace Xsolla.SDK.Store
                                 XsollaLogger.Debug(Tag, $"{errorMsg}\nTrying to auth by device ID..");
 
                                 XsollaAuth.AuthViaDeviceID(
-                                    _settings,
+                                    settings,
                                     onSuccess: () =>
                                     {
                                         XsollaLogger.Debug(Tag, "Authenticate onSuccess");

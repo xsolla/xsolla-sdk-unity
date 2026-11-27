@@ -1,3 +1,58 @@
+## [3.1.25] - 2026-11-27
+
+### Added
+
+- Android: the SDK creates `Assets/Plugins/Android` when Android is the active build target (the External Dependency Manager fails to resolve in a new project without it)
+
+### Changed
+
+- `XsollaStoreClient.Initialize` no longer throws when the store client throws before answering (the exception is logged and the completion handler gets an `initialization failed: ` error)
+- `XsollaPurchasingModule` is now left out of the build on `Unity In-App Purchasing` older than 4.13.0 (the editor logs a warning); upgrade to 4.15.1
+- Win/Mac/WebGL: a failed purchase's `XsollaStoreClientError` now carries the API response's `statusCode`, `errorCode` and `errorMessage`, as on Android
+- Android: purchase failures raised before the payment flow opens now name the product (`sku=<id>`)
+
+### Fixed
+
+- Win/Mac/WebGL/Android: a purchase still open at `Deinitialize` or a repeated `Initialize` now fails with `Aborted` (a purchase paid meanwhile arrives with the next restore)
+- Win/Mac/WebGL: `XsollaStoreClient.Initialize` called again without `Deinitialize` now signs the user in and fetches the products again (the fetch returned no products and restores failed with `InvalidToken`)
+- Win/Mac/WebGL: with the Events API, purchases and restore polling after a repeated `Initialize` now use the latest session
+- `XsollaStoreClient.Initialize` now answers once when the configuration can't be resolved (a failed delayed configuration task or a mapper that throws or returns null) or the store client throws
+- `XsollaLoginClient` sign-in, `RefreshToken` and `ClearToken` now fail with a `configuration failed: ` error when the delayed configuration task or its mapper fails (they never answered)
+- Android: `XsollaStoreClient.Deinitialize` now always calls its completion handler, also before the store connects or when called twice, and accepts a null one
+- Android: `XsollaStoreClient.Initialize` called again while an earlier call is still connecting now answers only the latest call
+- Android: a purchase event or store connection result that arrives after `Deinitialize` no longer crashes the app
+- Android: when the native bridge can't be created or a call can't build its arguments (such as bridge callbacks stripped from the build), store and login calls now fail through their error callbacks instead of throwing
+- Android: when the native SDK fails to start, product requests and restores fail with the error and `XsollaPurchasingModule` initialization fails as with no products available
+- `XsollaPurchasingModule` no longer leaves Unity IAP initialization waiting forever when the delayed configuration task fails or the store client throws while starting or fetching products (initialization fails instead)
+- `XsollaPurchasingModule` no longer holds back every purchase for the session when the first product fetch or the app's `IStoreListener` callbacks throw during initialization
+- An exception thrown by an SDK callback, such as an app's Unity IAP `ProcessPurchase`, no longer drops the other callbacks due in the same frame or waiting on the same result (it is still reported to the Unity console)
+- Unity IAP: a purchase reported twice before it reached Unity IAP at startup now consumes the quantity handed to Unity IAP
+- Unity IAP: a consumable delivered before `UpdateAccessToken` switched users is no longer consumed under the new user (it is consumed once that user's token is set again)
+- Win/Mac/WebGL: with the Events API, a purchase in WebShop mode or with a payment token now completes when its payment arrives (it failed at the 10-minute tracking limit)
+- Win/Mac/WebGL: with the Events API and no `localPurchasesRestoreInterval`, each purchase now fails 10 minutes after it started (a new purchase restarted the limit of those already tracked)
+- Win/Mac/WebGL: with the Events API, a paid payment-token purchase with an invalid order ID now completes at once when `allowTokenOnlyFinishedStatusWithoutOrderId` is set, and fails with its error otherwise
+- Win/Mac/WebGL: without the Events API, a purchase refunded before delivery (order status `canceled`) now fails (Unity IAP: `PaymentDeclined`)
+- Win/Mac/WebGL: without the Events API, a temporary order status failure (network error, server error, rate limit) no longer fails the purchase; tracking continues up to the 10-minute limit
+- WebGL: without the Events API, a payment-token purchase in the in-page Pay Station widget now gets its result outside Safari (tracked while the widget is open and up to 10 minutes after it closes)
+- Win/Mac/WebGL: `XsollaStoreClient.PurchaseProduct` no longer answers twice when a purchase completes after it was reported failed, such as at the 10-minute tracking limit (it arrives through `OnRestore`; Unity IAP is unaffected)
+- Win/Mac/WebGL: buying an item again while its earlier purchase in WebShop mode or with the same payment token is tracked now fails the earlier purchase and tracks the new one (the new one never got a result)
+- Win/Mac/WebGL: a purchase started again from an earlier purchase's result, such as a retry from its failure handler or during `StopAllOrdersFromTracking`, now gets its own result
+- Win/Mac/WebGL: a failed purchase keeps its error code in every flow (on WebGL, closing the widget of a payment-token purchase is reported as cancelled, not declined)
+- Win/Mac/WebGL: a purchase in WebShop mode with no web shop URL or user ID now fails with a plain message, without the `Error: UnknownError. Message: ` prefix
+- Win/Mac/WebGL: error messages no longer end in a doubled period (the launcher sign-in error now reads as a message, not a status code)
+- Android: when several purchases are open at once, such as on a double tap, each now gets a single result except one in WebShop mode without a payment token (closing the second payment view reports `UserCancelled`)
+- Android: a purchase that fails to start no longer also receives the next purchase's result
+- Android: a purchase in WebShop mode no longer also receives the result of a purchase started after it (a paid one arrives with the next restore)
+- Android: a purchase the native SDK refuses to start now fails (Unity IAP: `UserCancelled` when cancelled by `StopAllOrdersFromTracking`, otherwise `PaymentDeclined`)
+- Android: a purchase of a product the store returns no details for now fails (Unity IAP: `PaymentDeclined`)
+- Android: a failed purchase whose message contains quotes or backslashes keeps its error code (a cancellation was reported as a declined payment)
+- Android: `StopAllOrdersFromTracking` now cancels every open purchase except one in WebShop mode without a payment token (it cancelled only the latest)
+- Android: a payment-token purchase now starts its payment flow on the UI thread, as the native SDK requires
+- Android: a restore after switching back to a user in the same session no longer delivers that user's unconsumed items again under new transaction ids
+- Android: in JWT mode, `XsollaStoreClient.GetAccessToken` now answers the token in use when it was called, even if `UpdateAccessToken` follows at once
+- Android: social and widget login and `ClearToken` now report a failure to convert their result through the error callback (an error text containing `%` left the request unanswered)
+- iOS: a purchase restore requested before the native sign-in completes now answers with nothing restored instead of failing as not configured
+
 ## [3.1.24] - 2026-11-20
 
 ### Added

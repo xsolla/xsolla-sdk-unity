@@ -1082,7 +1082,7 @@ namespace Xsolla.Catalog
 				orderData => {
 					onOrderCreated?.Invoke(orderData);
 
-					XsollaWebBrowser.OpenPurchaseUI(
+					var isPurchaseUIInPage = XsollaWebBrowser.OpenPurchaseUI(
 						settings,
 						orderData.token,
 						false,
@@ -1125,7 +1125,8 @@ namespace Xsolla.Catalog
 							
 							onError?.Invoke(error);
 						},
-						sdkType
+						sdkType,
+						isPurchaseUIInPage
 					);
 				},
 				onError,
@@ -1291,7 +1292,7 @@ namespace Xsolla.Catalog
 				return;
 			}
 			
-			XsollaWebBrowser.OpenPurchaseUI(
+			var isPurchaseUIInPage = XsollaWebBrowser.OpenPurchaseUI(
 				settings,
 				paymentToken,
 				false,
@@ -1359,7 +1360,8 @@ namespace Xsolla.Catalog
 					else
 						onError?.Invoke(error);
 				},
-				sdkType
+				sdkType,
+				isPurchaseUIInPage
 			);
 		}
 	}

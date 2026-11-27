@@ -1190,6 +1190,17 @@ extern "C"
     void _XsollaUnityBridgeRestore(XsollaUnityBridgeJsonCallbackDelegate callback, int64_t callbackData) {
         XsollaUnityLog(SKLogLevelVerbose, @"_XsollaUnityBridgeRestore");
 
+        // The native SDK logs in on start and restores by itself once that login completes, delivering the purchases
+        // through the transaction observer. A restore requested before then has no user to restore for and fails, so
+        // answer it with nothing restored, as a restore after login answers too: the purchases arrive with that login.
+        SKPaymentSettings* settings = XsollaUnityMobile.shared.settings;
+        if (settings != nil && !settings.useSimpleMode && settings.useLocalPurchaseRestoration &&
+            [SKPaymentQueue defaultQueue].currentLoginToken == nil) {
+            XsollaUnityLog(SKLogLevelDebug, @"_XsollaUnityBridgeRestore: not logged in yet, purchases are restored once login completes");
+            callback(callbackData, "{ \"purchases\": [] }", NULL);
+            return;
+        }
+
         [[SKPaymentQueue defaultQueue] restoreUnfinishedPurchasesWithCompletion:^(SKXRestorationError* restoreError) {
             if (restoreError != nil) {
                 NSString* errorJson = [[XsollaUnityMobile shared] errorJsonWithMessage:restoreError.localizedDescription

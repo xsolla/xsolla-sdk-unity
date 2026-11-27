@@ -1,7 +1,5 @@
 #if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
 using System;
-using UnityEngine.Purchasing.Security;
-using Xsolla.SDK.Common;
 using Xsolla.SDK.Store;
 
 namespace Xsolla.SDK.UnityPurchasing
@@ -11,12 +9,10 @@ namespace Xsolla.SDK.UnityPurchasing
     /// </summary>
     public class XsollaPurchasingStoreValidator
     {
-        private const string Tag = "XsollaPurchasingStoreValidator";
-        
         /// <summary>
-        /// Reference to the store client responsible for backend validation.
+        /// The Unity IAP-neutral validator that does the work.
         /// </summary>
-        private readonly IXsollaStoreClient _storeClient;
+        private readonly XsollaPurchasingReceiptValidator _validator;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="XsollaPurchasingStoreValidator"/> class.
@@ -24,7 +20,7 @@ namespace Xsolla.SDK.UnityPurchasing
         /// <param name="store">The store client to use for validation.</param>
         internal XsollaPurchasingStoreValidator(IXsollaStoreClient store)
         {
-            _storeClient = store;
+            _validator = new XsollaPurchasingReceiptValidator(store);
         }
 
         /// <summary>
@@ -36,26 +32,8 @@ namespace Xsolla.SDK.UnityPurchasing
         /// The first parameter indicates success (true/false),
         /// and the second provides an error message if validation fails.
         /// </param>
-        public void Validate(string receipt, Action<bool, string> completionHandler)
-        {
-            XsollaLogger.Debug(Tag, "Validate");
-            
-            // Attempt to extract a payload from the receipt string.
-            var payloadStr = PurchaseEventArgsExtensions.ExtractPayloadAsString(receipt);
-
-            // Fallback to raw receipt if extraction fails or returns empty.
-            if (string.IsNullOrEmpty(payloadStr))
-            {
-                payloadStr = receipt;
-            }
-
-            // Send the payload to the store client for backend validation.
-            _storeClient.ValidatePurchase(
-                payloadStr,
-                onSuccess: result => completionHandler?.Invoke(result, null),
-                onError: error => completionHandler?.Invoke(false, error)
-            );
-        }
+        public void Validate(string receipt, Action<bool, string> completionHandler) =>
+            _validator.Validate(receipt, completionHandler);
     }
 }
 #endif

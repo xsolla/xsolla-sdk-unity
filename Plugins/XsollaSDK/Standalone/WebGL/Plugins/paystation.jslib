@@ -102,6 +102,8 @@ mergeInto(LibraryManager.library, {
 
                 if (status === 'done') {
                     _ClosePayStationWidget();
+
+                    Module.SendMessage('XsollaWebCallbacks', 'PublishPaymentClose');
                 }
 
             });
@@ -112,6 +114,7 @@ mergeInto(LibraryManager.library, {
 				}
 				else {
 					Module.SendMessage('XsollaWebCallbacks', 'PublishPaymentStatusUpdate');
+					Module.SendMessage('XsollaWebCallbacks', 'PublishPaymentClose');
 				}
 			});
 

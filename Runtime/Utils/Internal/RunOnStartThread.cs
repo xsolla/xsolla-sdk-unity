@@ -47,7 +47,14 @@ namespace Xsolla.SDK.Utils
 
             if (actionsToRun == null) return;
             foreach (var action in actionsToRun) {
-                action();
+                try {
+                    action();
+                }
+                catch (Exception exception) {
+                    // One failing action must not cost the others their delivery. Reported straight to Unity,
+                    // whatever the SDK log level, as it would be had it escaped: it is most likely the app's own.
+                    Debug.LogException(exception);
+                }
             }
         }
         

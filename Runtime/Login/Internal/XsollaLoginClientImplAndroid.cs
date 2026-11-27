@@ -27,16 +27,18 @@ namespace Xsolla.SDK.Login
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "LoginWithSocialAccount",
                 onError: error => onError?.Invoke(error),
-                XsollaClientHelpers.ConfigurationToJson(configuration),
-                provider,
-                accountToken,
-                XsollaClientBridgeHelpersAndroid.CreateCallback( $"{nameof(LoginWithSocialAccount)}",
-                    onSuccess: token => {
-                        XsollaLogger.Debug(Tag, $"{nameof(LoginWithSocialAccount)} (token={LogObfuscation.ObfuscateJsonIfEnabled(token)})");
-                        onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(token));
-                    },
-                    onError: error => onError?.Invoke(error)
-                )
+                args: () => new object[] {
+                    XsollaClientHelpers.ConfigurationToJson(configuration),
+                    provider,
+                    accountToken,
+                    XsollaClientBridgeHelpersAndroid.CreateCallback( $"{nameof(LoginWithSocialAccount)}",
+                        onSuccess: token => {
+                            XsollaLogger.Debug(Tag, $"{nameof(LoginWithSocialAccount)} (token={LogObfuscation.ObfuscateJsonIfEnabled(token)})");
+                            onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(token));
+                        },
+                        onError: error => onError?.Invoke(error)
+                    )
+                }
             );
         }
 
@@ -51,14 +53,16 @@ namespace Xsolla.SDK.Login
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "ClearToken",
                 onError: error => onError?.Invoke(error),
-                XsollaClientHelpers.ConfigurationToJson(configuration),
-                XsollaClientBridgeHelpersAndroid.CreateCallback( "ClearToken",
-                    onSuccess: result => {
-                        XsollaLogger.Debug(Tag, $"Cleared token (result={LogObfuscation.ObfuscateJsonIfEnabled(result)})");
-                        onSuccess?.Invoke();
-                    },
-                    onError: error => onError?.Invoke(error)
-                )
+                args: () => new object[] {
+                    XsollaClientHelpers.ConfigurationToJson(configuration),
+                    XsollaClientBridgeHelpersAndroid.CreateCallback( "ClearToken",
+                        onSuccess: result => {
+                            XsollaLogger.Debug(Tag, $"Cleared token (result={LogObfuscation.ObfuscateJsonIfEnabled(result)})");
+                            onSuccess?.Invoke();
+                        },
+                        onError: error => onError?.Invoke(error)
+                    )
+                }
             );
         }
 
@@ -72,15 +76,17 @@ namespace Xsolla.SDK.Login
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: "RefreshToken",
                 onError: error => onError?.Invoke(error),
-                XsollaClientHelpers.ConfigurationToJson(configuration),
-                XsollaClientHelpers.ToJson(token),
-                XsollaClientBridgeHelpersAndroid.CreateCallback( "RefreshToken",
-                    onSuccess: result => {
-                        XsollaLogger.Debug(Tag, $"Refreshed token (result={LogObfuscation.ObfuscateJsonIfEnabled(result)})");
-                        onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(result));
-                    },
-                    onError: error => onError?.Invoke(error)
-                )
+                args: () => new object[] {
+                    XsollaClientHelpers.ConfigurationToJson(configuration),
+                    XsollaClientHelpers.ToJson(token),
+                    XsollaClientBridgeHelpersAndroid.CreateCallback( "RefreshToken",
+                        onSuccess: result => {
+                            XsollaLogger.Debug(Tag, $"Refreshed token (result={LogObfuscation.ObfuscateJsonIfEnabled(result)})");
+                            onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(result));
+                        },
+                        onError: error => onError?.Invoke(error)
+                    )
+                }
             );
         }
 
@@ -95,11 +101,10 @@ namespace Xsolla.SDK.Login
 
             XsollaClientBridgeHelpersAndroid.JavaCall(
                 method: javaMethodName,
-                json: XsollaClientHelpers.ConfigurationToJson(configuration),
-                callback: XsollaClientBridgeHelpersAndroid.CreateCallback(logTag,
-                    onSuccess: result => onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(result)),
-                    onError: error => onError?.Invoke(error)
-                )
+                json: () => XsollaClientHelpers.ConfigurationToJson(configuration),
+                logTag: logTag,
+                onSuccess: result => onSuccess?.Invoke(XsollaLoginClientHelpers.JsonToLoginTokenInfo(result)),
+                onError: error => onError?.Invoke(error)
             );
         }
 

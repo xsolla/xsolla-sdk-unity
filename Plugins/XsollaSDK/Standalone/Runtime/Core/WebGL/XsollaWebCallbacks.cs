@@ -7,6 +7,7 @@ namespace Xsolla.Core
 	{
 		private event Action OnPaymentStatusUpdate;
 		private event Action OnPaymentCancel;
+		private event Action OnPaymentClose;
 
 		public event Action<string> WidgetAuthSuccess;
 		public event Action WidgetAuthCancel;
@@ -28,6 +29,15 @@ namespace Xsolla.Core
 		public void PublishPaymentCancel()
 		{
 			OnPaymentCancel?.Invoke();
+		}
+
+		/// <summary>
+		/// Callback for Xsolla Pay Station (do not remove): the in-page widget left the page without a cancel, after a
+		/// status message or once the payment is done.
+		/// </summary>
+		public void PublishPaymentClose()
+		{
+			OnPaymentClose?.Invoke();
 		}
 
 		// Callback for Xsolla Widget (do not remove)
@@ -60,6 +70,16 @@ namespace Xsolla.Core
 		public static void RemovePaymentCancelHandler(Action action)
 		{
 			Instance.OnPaymentCancel -= action;
+		}
+
+		public static void AddPaymentCloseHandler(Action action)
+		{
+			Instance.OnPaymentClose += action;
+		}
+
+		public static void RemovePaymentCloseHandler(Action action)
+		{
+			Instance.OnPaymentClose -= action;
 		}
 		
 		public void InvokeOpenPopup(XsollaSettings settings, string payload)

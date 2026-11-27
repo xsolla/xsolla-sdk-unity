@@ -5,12 +5,29 @@ namespace Xsolla.Core
 {
 	internal static class OrderStatusService
 	{
+		/// <summary>
+		/// Performs the order-status web request, cache aside.
+		/// <para/>
+		/// Production keeps <see cref="PerformWebRequest"/>. Tests swap it to script statuses for the order trackers without
+		/// a backend. The token-refresh retry inside <see cref="PerformWebRequest"/> deliberately calls the real request.
+		/// </summary>
+		internal static Action<XsollaSettings, long, string, Action<OrderStatus>, Action<Error>, SdkType> OrderStatusRequester = PerformWebRequest;
+
+		/// <summary>
+		/// Performs the payment-status web request of a payment token.
+		/// <para/>
+		/// Production keeps <see cref="PerformOrderInfoRequest"/>. Tests swap it to script payment statuses for the order
+		/// trackers without a backend. The token-refresh retry inside <see cref="PerformOrderInfoRequest"/> deliberately calls
+		/// the real request.
+		/// </summary>
+		internal static Action<XsollaSettings, string, SdkType, Action<OrderInfo>, Action<Error>> OrderInfoRequester = PerformOrderInfoRequest;
+
 		public static void GetOrderStatus(XsollaSettings settings, long orderId, Action<OrderStatus> onSuccess, Action<Error> onError, SdkType sdkType = SdkType.Store, string token = null)
 		{
 			if (OrderStatusCache.TryPerform(orderId, onSuccess))
 				return;
 
-			PerformWebRequest(
+			OrderStatusRequester(
 				settings,
 				orderId,
 				token,
@@ -52,6 +69,11 @@ namespace Xsolla.Core
                 return;
             }
 
+            OrderInfoRequester(settings, accessToken, sdkType, onSuccess, onFailure);
+        }
+
+		private static void PerformOrderInfoRequest(XsollaSettings settings, string accessToken, SdkType sdkType, Action<OrderInfo> onSuccess, Action<Error> onFailure)
+        {
             var url = PayStationUrlBuilder.GetPaystationHost(settings) + $"paystation2/api/payments/status?access_token={accessToken}";
 
             XDebug.Log(settings, $"[OrderInfo.Query] url={LogRedaction.Redact(url)}");
@@ -74,7 +96,7 @@ namespace Xsolla.Core
                                 errorMessage: "Failed to reach order info service: " + error
                             ));
                         },
-                        onSuccess: () => GetOrderInfo(settings, accessToken, sdkType, onSuccess, onFailure)
+                        onSuccess: () => PerformOrderInfoRequest(settings, accessToken, sdkType, onSuccess, onFailure)
                     );
                 }
             );

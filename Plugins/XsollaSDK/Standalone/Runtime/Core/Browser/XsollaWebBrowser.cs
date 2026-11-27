@@ -16,19 +16,29 @@ namespace Xsolla.Core
 			}
 		}
 
-		public static void OpenPurchaseUI(XsollaSettings settings, string paymentToken, bool forcePlatformBrowser = false, Action<BrowserCloseInfo> onBrowserClosed = null, PlatformSpecificAppearance platformSpecificAppearance = null, SdkType sdkType = SdkType.Store)
+		/// <summary>
+		/// Opens Pay Station for <paramref name="paymentToken"/>: on a WebGL build with the in-app browser on, as the widget
+		/// inside the page, otherwise in a browser window or tab.
+		/// </summary>
+		/// <returns>Whether Pay Station shows in the page, as the widget that reports its own close, rather than in a browser
+		/// window or tab that reports nothing.</returns>
+		public static bool OpenPurchaseUI(XsollaSettings settings, string paymentToken, bool forcePlatformBrowser = false, Action<BrowserCloseInfo> onBrowserClosed = null, PlatformSpecificAppearance platformSpecificAppearance = null, SdkType sdkType = SdkType.Store)
 		{
 			EventManagerProvider.Handler?.BroadcastEvent(EventTypes.PaystationOpen);
 			
 			var url = new PayStationUrlBuilder(settings, paymentToken, sdkType).Build(settings);
-			if (Application.platform == RuntimePlatform.WebGLPlayer && !Application.isEditor && settings.InAppBrowserEnabled)
+			var isInPage = Application.platform == RuntimePlatform.WebGLPlayer && !Application.isEditor && settings.InAppBrowserEnabled;
+			if (isInPage)
 			{
 				XsollaWebBrowserHandlerWebGL.OpenPayStation(settings, paymentToken, onBrowserClosed, platformSpecificAppearance?.WebGlAppearance, externalUrl: url, sdkType);
-				return;
 			}
-			
-			XDebug.Log($"Purchase url: {LogRedaction.Redact(url)}");
-			Open_(url, forcePlatformBrowser);
+			else
+			{
+				XDebug.Log($"Purchase url: {LogRedaction.Redact(url)}");
+				Open_(url, forcePlatformBrowser);
+			}
+
+			return isInPage;
 		}
 		
 		public static void OpenWebshop(string url, bool forcePlatformBrowser = false)

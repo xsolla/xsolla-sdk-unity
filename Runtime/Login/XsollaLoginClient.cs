@@ -10,6 +10,8 @@ namespace Xsolla.SDK.Login
     /// </summary>
     public class XsollaLoginClient
     {
+        private const string Tag = "XsollaLoginClient";
+
         /// <summary>
         /// Internal login implementation (platform-specific).
         /// </summary>
@@ -63,18 +65,12 @@ namespace Xsolla.SDK.Login
 
             if (configuration.delayedTask != null)
             {
-                AwaitForConfiguration(configuration, promise);
+                XsollaDelayedConfiguration.Resolve(configuration, RunOnStartThread.Run, promise, Tag);
             }
             else
             {
                 promise.Complete(configuration);
             }
-        }
-        
-        private async void AwaitForConfiguration(XsollaClientConfiguration configuration, ISimplePromise<XsollaClientConfiguration, string> promise)
-        {
-            var mapper = await configuration.delayedTask;
-            RunOnStartThread.Run(() => promise.Complete(mapper(configuration)));
         }
 
         /// <summary>

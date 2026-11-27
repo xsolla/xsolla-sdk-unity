@@ -110,6 +110,8 @@ namespace Xsolla.SDK.Store
                     .Build()
             );
         }
+
+        public bool CanAnswerPurchase(string sku, XsollaStoreClientPurchaseArgs args) => true;
         
         public void ConsumeProduct(string sku, int quantity, string transactionId, ConsumeProductResultFunc onSuccess, ErrorFunc onError)
         {

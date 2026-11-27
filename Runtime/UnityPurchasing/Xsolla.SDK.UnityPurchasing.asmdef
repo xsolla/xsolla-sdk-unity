@@ -17,8 +17,15 @@
     "autoReferenced": true,
     "defineConstraints": [
         "!XSOLLA_SDK_DISABLE",
-        "!XSOLLA_SDK_UNITY_PURCHASING_DISABLE"
+        "!XSOLLA_SDK_UNITY_PURCHASING_DISABLE",
+        "XSOLLA_SDK_UIAP_4"
     ],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.purchasing",
+            "expression": "[4.13.0,5.0.0)",
+            "define": "XSOLLA_SDK_UIAP_4"
+        }
+    ],
     "noEngineReferences": false
 }

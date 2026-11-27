@@ -50,6 +50,8 @@ namespace Xsolla.Core
 		OrderInfoDoneButInvalidOrderId,
 		OrderInfoUnreachable,
 		
-		Aborted
+		Aborted,
+
+		OrderCanceled
 	}
 }

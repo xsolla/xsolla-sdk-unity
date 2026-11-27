@@ -37,6 +37,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -66,7 +67,13 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         @Nullable
         private BillingClient billingClient = null;
 
-        public boolean shutdown() {
+        /**
+         * Detaches the held client and ends its connection, also while it is still connecting.
+         * <p>
+         * The native {@code endConnection} closes a connecting client as well, so the connection
+         * it was setting up is dropped instead of completing alongside the next client's.
+         */
+        public void shutdown() {
             final BillingClient billingClient_;
 
             synchronized (this) {
@@ -74,13 +81,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 billingClient = null;
             }
 
-            if (billingClient_ == null || !billingClient_.isReady()) {
-                return false;
+            if (billingClient_ != null) {
+                billingClient_.endConnection();
             }
-
-            billingClient_.endConnection();
-
-            return true;
         }
 
         public void set(@Nullable final BillingClient billingClient) {
@@ -364,11 +367,43 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     @NonNull
     private final Handler mainThreadHandler = HandlerCompat.createAsync(Looper.getMainLooper());
 
-    private IXsollaUnityBridgeJsonCallback m_stateCallback;
-    private IXsollaUnityBridgeJsonCallback m_purchaseCallback;
+    private volatile IXsollaUnityBridgeJsonCallback m_stateCallback;
+    private volatile IXsollaUnityBridgeJsonCallback m_purchaseCallback;
 
     @NonNull
     private static final AtomicReference<JWTRefresher> jwtRefresher = new AtomicReference<>(null);
+
+    /**
+     * The JWT last handed to this store's native SDK in JWT mode, or null outside JWT mode: the configured one from
+     * {@code Initialize}, then each one {@code UpdateAccessToken} sends to the store's own refresher, set before the
+     * refresher gets it.
+     * <p>
+     * The native SDK takes JWTs only from this bridge, so this is the token it authenticates with from its next
+     * authentication on. {@code GetAccessToken} answers with the one current when it was called: the native SDK adopts
+     * a queued JWT on the pool thread that answers the read, so a read followed at once by an update could otherwise
+     * answer the new token.
+     */
+    @NonNull
+    private final AtomicReference<HandedJwt> handedJwt = new AtomicReference<>(null);
+
+    /**
+     * A JWT handed to the native SDK, with the {@link JWTRefresher} wired to the authenticator that takes it.
+     */
+    private static final class HandedJwt {
+        @NonNull
+        final JWTRefresher refresher;
+
+        @NonNull
+        final JWT jwt;
+
+        HandedJwt(
+            @NonNull final JWTRefresher refresher,
+            @NonNull final JWT jwt
+        ) {
+            this.refresher = refresher;
+            this.jwt = jwt;
+        }
+    }
 
     enum SimpleMode {
         Off,
@@ -450,8 +485,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     // the native default.
     private static boolean skipNonExistentProductsOnQuery = true;
 
+    /**
+     * Cancellers of the purchases that may still be open, all of which {@code CancelActivePurchase} cancels, as the Unity
+     * side may run several purchases at once.
+     * <p>
+     * A purchase removes its canceller when it ends before its billing flow runs. A flow that runs reports through
+     * {@link #onPurchasesUpdated} without naming its canceller, so that canceller stays until the next cancel, which only
+     * flags the finished flow.
+     */
     @NonNull
-    private final AtomicReference<BillingFlowCanceller> currentPurchaseCanceller = new AtomicReference<>();
+    private final Set<BillingFlowCanceller> purchaseCancellers = ConcurrentHashMap.newKeySet();
 
     @NonNull
     private final ConsumeActivityTracker consumeActivity = new ConsumeActivityTracker();
@@ -530,14 +573,42 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             Log.e(TAG, msg);
     }
 
-    private void reportPurchaseError(@NonNull final BillingResult billingResult) {
-        logError(billingResult.toString());
+    /**
+     * Makes a failure the bridge raises for a purchase name its SKU, as the native SDK does for every failure of a product
+     * billing flow, so the Unity side can tell which of several waiting purchases it answers.
+     * <p>
+     * Appends {@code " (sku=<id>)"} unless the message already names that SKU. A longer SKU that starts with it, such as
+     * {@code sku=gold_big} for {@code gold}, does not count: the Unity side reads a named SKU up to the first character an
+     * SKU can't contain.
+     */
+    @NonNull
+    private static BillingResult withSkuContext(@NonNull final BillingResult result, @NonNull final String sku) {
+        final String skuContext = "sku=" + sku;
+        final Pattern namesSku = Pattern.compile(Pattern.quote(skuContext) + "(?![A-Za-z0-9_.\\-])");
+        if (sku.isEmpty() || namesSku.matcher(result.getDebugMessage()).find()) {
+            return result;
+        }
+        return BillingResult.newBuilder()
+            .setResponseCode(result.getResponseCode())
+            .setDebugMessage(result.getDebugMessage() + " (" + skuContext + ")")
+            .build();
+    }
+
+    private void reportPurchaseError(
+        @NonNull final BillingResult billingResult,
+        @NonNull final String sku,
+        @NonNull final JsonHelper.PurchaseFailureReason reason
+    ) {
+        final BillingResult skuBillingResult = withSkuContext(billingResult, sku);
+
+        logError(skuBillingResult.toString());
 
         consumeActivity.onPurchaseResult();
 
         mainThreadHandler.post(() -> {
-            if (m_purchaseCallback != null) {
-                m_purchaseCallback.onError(JsonHelper.billingResultToJson(billingResult));
+            final IXsollaUnityBridgeJsonCallback purchaseCallback = m_purchaseCallback;
+            if (purchaseCallback != null) {
+                purchaseCallback.onError(JsonHelper.billingResultToJson(skuBillingResult, reason));
             }
         });
     }
@@ -769,6 +840,17 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
         final var config = maybeJson.flatMap(JsonHelper::jsonToConfig);
 
+        handedJwt.set(config
+            .map(Config::getIntegration)
+            .filter(Config.Integration.Xsolla.class::isInstance)
+            .map(integration -> ((Config.Integration.Xsolla) integration).getAuthentication())
+            .filter(Config.Integration.Xsolla.Authentication.ForJWT.class::isInstance)
+            .map(authentication -> (Config.Integration.Xsolla.Authentication.ForJWT) authentication)
+            .filter(forJwt -> forJwt.getRefresher() != null)
+            .map(forJwt -> new HandedJwt(forJwt.getRefresher(), forJwt.getJwt()))
+            .orElse(null)
+        );
+
         final var billingClient = BillingClient
             .newBuilder(activity)
             .setConfig(config
@@ -902,15 +984,22 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         billingClient.startConnection(new BillingClientStateListener() {
             @Override
             public void onBillingServiceDisconnected() {
-                m_stateCallback.onError("Billing client has disconnected from the services.");
+                // Only this session answers: `Deinitialize` may have cleared the callback, or a later
+                // `Initialize` replaced it, before the native SDK reports back.
+                if (m_stateCallback == stateCallback) {
+                    stateCallback.onError("Billing client has disconnected from the services.");
+                }
             }
 
             @Override
             public void onBillingSetupFinished(@NonNull final BillingResult result) {
+                if (m_stateCallback != stateCallback) {
+                    return;
+                }
                 if (result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
-                    m_stateCallback.onError(result.toString());
+                    stateCallback.onError(result.toString());
                 } else {
-                    m_stateCallback.onSuccess("");
+                    stateCallback.onSuccess("");
                 }
             }
         });
@@ -1023,42 +1112,47 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 "An external transaction token is only supported by the product based billing"
                     + " flow, which is unavailable while a payment token is used or 'SimpleMode'"
                     + " is not 'Off'"
-            ).toBillingResult());
+            ).toBillingResult(), sku, JsonHelper.PurchaseFailureReason.PurchasingUnavailable);
             return;
         }
 
         if (simpleMode == SimpleMode.ServerTokens || maybePaymentToken.isPresent()) {
-            BillingResult billingResult;
-
             if (maybePaymentToken.isPresent()) {
-                try {
-                    final BillingFlowCanceller purchaseCanceller = new BillingFlowCanceller();
+                final BillingFlowCanceller purchaseCanceller = new BillingFlowCanceller();
 
-                    currentPurchaseCanceller.set(purchaseCanceller);
+                purchaseCancellers.add(purchaseCanceller);
 
-                    final BillingFlowTokenParams params = BillingFlowTokenParams.newBuilder()
-                        .setPaymentToken(maybePaymentToken.get())
-                        .setDeveloperPayload(maybeDeveloperPayload.orElse(null))
-                        .setInvokePurchasesUpdatedIfOrderIdMissingOverride(
-                            maybeAllowTokenOnlyFinishedStatusWithoutOrderId.orElse(false)
-                        )
-                        .setCanceller(purchaseCanceller)
-                        .build();
-                    billingResult = billingClient.launchBillingFlow(activity, params);
-                } catch (Exception e) {
-                    billingResult = Error.of(e,
-                        "Failed to launch a token based billing flow (token=%s)",
-                        maybePaymentToken.get()
-                    ).toBillingResult();
-                }
+                // `launchBillingFlow` is `@UiThread`, and this runs on the Unity player thread. A cancel that arrives
+                // before the post runs makes the launch report `USER_CANCELED`.
+                mainThreadHandler.post(() -> {
+                    BillingResult billingResult;
+
+                    try {
+                        final BillingFlowTokenParams params = BillingFlowTokenParams.newBuilder()
+                            .setPaymentToken(maybePaymentToken.get())
+                            .setDeveloperPayload(maybeDeveloperPayload.orElse(null))
+                            .setInvokePurchasesUpdatedIfOrderIdMissingOverride(
+                                maybeAllowTokenOnlyFinishedStatusWithoutOrderId.orElse(false)
+                            )
+                            .setCanceller(purchaseCanceller)
+                            .build();
+                        billingResult = billingClient.launchBillingFlow(activity, params);
+                    } catch (Exception e) {
+                        billingResult = Error.of(e,
+                            "Failed to launch a token based billing flow (token=%s)",
+                            maybePaymentToken.get()
+                        ).toBillingResult();
+                    }
+
+                    if (!billingResult.isSuccessful()) {
+                        purchaseCancellers.remove(purchaseCanceller);
+                        reportPurchaseError(billingResult, sku, JsonHelper.PurchaseFailureReason.PurchasingUnavailable);
+                    }
+                });
             } else {
-                billingResult = Error.of(
+                reportPurchaseError(Error.of(
                     "'SimpleMode' is set to 'ServerTokens', but the token wasn't provided"
-                ).toBillingResult();
-            }
-
-            if (!billingResult.isSuccessful()) {
-                reportPurchaseError(billingResult);
+                ).toBillingResult(), sku, JsonHelper.PurchaseFailureReason.PurchasingUnavailable);
             }
         } else if (simpleMode == SimpleMode.WebShop) {
             final CompletableFuture<Either<Error, Void>> future = new CompletableFuture<>();
@@ -1089,12 +1183,18 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             if (m_purchaseCallback != null) {
                 future.thenAcceptAsync(either -> {
                     mainThreadHandler.post(() -> {
+                        // `Deinitialize` may have cleared the callback since the check above.
+                        final IXsollaUnityBridgeJsonCallback purchaseCallback = m_purchaseCallback;
+                        if (purchaseCallback == null) {
+                            return;
+                        }
                         either.voidFold(
                             err -> {
                                 consumeActivity.onPurchaseResult();
-                                m_purchaseCallback.onError(
-                                    JsonHelper.billingResultToJson(err.toBillingResult())
-                                );
+                                purchaseCallback.onError(JsonHelper.billingResultToJson(
+                                    withSkuContext(err.toBillingResult(), sku),
+                                    JsonHelper.PurchaseFailureReason.PurchasingUnavailable
+                                ));
                             },
                             __ -> { /* no-op on success */ }
                         );
@@ -1102,6 +1202,11 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 });
             }
         } else {
+            // Registered before the query, so a cancel during it makes the launch report `USER_CANCELED`.
+            final BillingFlowCanceller purchaseCanceller = new BillingFlowCanceller();
+
+            purchaseCancellers.add(purchaseCanceller);
+
             final QueryProductDetailsParams params = QueryProductDetailsParams.newBuilder()
                 .setProductList(Collections.singletonList(
                     QueryProductDetailsParams.Product.newBuilder()
@@ -1113,27 +1218,46 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
 
             billingClient.queryProductDetailsAsync(params, (result, productDetailsList) -> {
                 if (result.getResponseCode() != BillingClient.BillingResponseCode.OK || productDetailsList == null) {
-                    reportPurchaseError(result);
-                } else {
-                    final BillingFlowCanceller purchaseCanceller = new BillingFlowCanceller();
-
-                    currentPurchaseCanceller.set(purchaseCanceller);
-
-                    billingClient.launchBillingFlow(activity, BillingFlowParams.newBuilder()
-                        .setProductDetailsParamsList(Collections.singletonList(
-                            BillingFlowParams.ProductDetailsParams
-                                .newBuilder()
-                                .setProductDetails(productDetailsList.get(0))
-                                .build()
-                        ))
-                        .setDeveloperPayload(maybeDeveloperPayload.orElse(null))
-                        .setExternalTransactionId(maybeExternalTransactionId.orElse(null))
-                        .setExternalTransactionToken(maybeExternalTransactionToken.orElse(null))
-                        .setForcePaymentMethodId(maybePaymentMethodId.orElse(null))
-                        .setTrackingId(trackingId)
-                        .setCanceller(purchaseCanceller)
-                        .build()
+                    purchaseCancellers.remove(purchaseCanceller);
+                    reportPurchaseError(result, sku,
+                        result.getResponseCode() == BillingClient.BillingResponseCode.ITEM_UNAVAILABLE
+                            ? JsonHelper.PurchaseFailureReason.ProductUnavailable
+                            : JsonHelper.PurchaseFailureReason.PurchasingUnavailable
                     );
+                } else if (productDetailsList.isEmpty()) {
+                    // An OK answer without the product: fail it as the store's own `ITEM_UNAVAILABLE` above would.
+                    purchaseCancellers.remove(purchaseCanceller);
+                    reportPurchaseError(BillingResult.newBuilder()
+                        .setResponseCode(BillingClient.BillingResponseCode.ITEM_UNAVAILABLE)
+                        .setDebugMessage("No product details were returned for the product")
+                        .build(), sku, JsonHelper.PurchaseFailureReason.ProductUnavailable);
+                } else {
+                    BillingResult billingResult;
+
+                    try {
+                        billingResult = billingClient.launchBillingFlow(activity, BillingFlowParams.newBuilder()
+                            .setProductDetailsParamsList(Collections.singletonList(
+                                BillingFlowParams.ProductDetailsParams
+                                    .newBuilder()
+                                    .setProductDetails(productDetailsList.get(0))
+                                    .build()
+                            ))
+                            .setDeveloperPayload(maybeDeveloperPayload.orElse(null))
+                            .setExternalTransactionId(maybeExternalTransactionId.orElse(null))
+                            .setExternalTransactionToken(maybeExternalTransactionToken.orElse(null))
+                            .setForcePaymentMethodId(maybePaymentMethodId.orElse(null))
+                            .setTrackingId(trackingId)
+                            .setCanceller(purchaseCanceller)
+                            .build()
+                        );
+                    } catch (Exception e) {
+                        billingResult = Error.of(e, "Failed to launch a product based billing flow").toBillingResult();
+                    }
+
+                    if (!billingResult.isSuccessful()) {
+                        purchaseCancellers.remove(purchaseCanceller);
+                        reportPurchaseError(billingResult, sku, JsonHelper.PurchaseFailureReason.PurchasingUnavailable);
+                    }
                 }
             });
         }
@@ -1146,11 +1270,12 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     ) {
         logDebug("CancelActivePurchase: " + maskJson(argsJson));
 
-        final BillingFlowCanceller billingFlowCanceller = currentPurchaseCanceller.getAndSet(null);
-        if (billingFlowCanceller != null) {
-            billingFlowCanceller.cancel();
+        for (final BillingFlowCanceller purchaseCanceller : purchaseCancellers) {
+            if (purchaseCancellers.remove(purchaseCanceller)) {
+                purchaseCanceller.cancel();
 
-            logDebug("CancelActivePurchase: Successfully scheduled active purchase cancellation");
+                logDebug("CancelActivePurchase: Successfully scheduled a purchase cancellation");
+            }
         }
     }
 
@@ -1453,9 +1578,9 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         m_stateCallback = null;
         m_purchaseCallback = null;
 
-        if (billingClientHolder.shutdown()) {
-            callback.onSuccess("");
-        }
+        billingClientHolder.shutdown();
+
+        callback.onSuccess("");
     }
 
     public void GetAccessToken(
@@ -1465,6 +1590,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
         logDebug("GetAccessToken: " + maskJson(argsJson));
 
         final var billingClient = billingClientHolder.getOrThrowIfNotReady();
+        final HandedJwt handedAtRead = handedJwt.get();
 
         billingClient.getAuthenticationToken((billingResult, authToken) -> {
             logDebug(String.format(Locale.getDefault(),
@@ -1475,6 +1601,20 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             final var maybeJson = Optional
                 .ofNullable(authToken)
                 .filter(__ -> billingResult.isSuccessful())
+                .map(authToken_ -> {
+                    if (handedAtRead != null &&
+                        !handedAtRead.jwt.getToken().equals(authToken_.getValue().toString())) {
+                        // The native SDK answered with a JWT handed over after this read was issued, or with
+                        // the one an authentication still in flight held before the last hand-over.
+                        logDebug(String.format(Locale.getDefault(),
+                            "GetAccessToken: answering the JWT current when the read was issued (token='%s')",
+                            mask(handedAtRead.jwt.getToken())
+                        ));
+                        return handedAtRead.jwt.toAuthToken();
+                    } else {
+                        return authToken_;
+                    }
+                })
                 .flatMap(authToken_ -> JsonHelper.tokenToJson(authToken_.getValue()))
                 .map(JSONObject::toString);
 
@@ -1503,6 +1643,11 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                 },
                 // Right.
                 jwt -> {
+                    handedJwt.updateAndGet(handed ->
+                        handed != null && handed.refresher == jwtRefresher_
+                            ? new HandedJwt(jwtRefresher_, jwt)
+                            : handed
+                    );
                     jwtRefresher_.update(jwt);
 
                     callback.onSuccess("");
@@ -1623,7 +1768,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                         callback.onSuccess(success.toJson(true).toString());
                     } catch (Exception e) {
                         callback.onError(String.format(Locale.getDefault(),
-                            "Failed to convert authentication data to JSON: " + e
+                            "Failed to convert authentication data to JSON: %s", e
                         ));
                     }
                 },
@@ -1798,17 +1943,25 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
     public void onPurchasesUpdated( @NonNull final BillingResult result, @Nullable final List<Purchase> purchases ) {
         consumeActivity.onPurchaseResult();
 
+        // Runs on the main looper, so `Deinitialize` on the Unity thread may have cleared the callback already.
+        final IXsollaUnityBridgeJsonCallback purchaseCallback = m_purchaseCallback;
+        if (purchaseCallback == null) {
+            logDebug("onPurchasesUpdated: dropped, the store is deinitialized");
+            return;
+        }
+
         if (result.getResponseCode() != BillingClient.BillingResponseCode.OK || purchases == null) {
-            m_purchaseCallback.onError(JsonHelper.billingResultToJson(result));
+            purchaseCallback.onError(JsonHelper.billingResultToJson(result, null));
             return;
         }
 
         final var resultJsonObject = JsonHelper.purchasesToJson(purchases);
         if (resultJsonObject.isPresent()) {
-            m_purchaseCallback.onSuccess(resultJsonObject.get().toString());
+            purchaseCallback.onSuccess(resultJsonObject.get().toString());
         } else {
-            m_purchaseCallback.onError(JsonHelper.billingResultToJson(
-                Error.of("Failed to prepare the resulting JSON for purchase.").toBillingResult()
+            purchaseCallback.onError(JsonHelper.billingResultToJson(
+                Error.of("Failed to prepare the resulting JSON for purchase.").toBillingResult(),
+                null
             ));
         }
     }
@@ -1854,7 +2007,7 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                         callback.onSuccess(success.toJson(true).toString());
                     } catch (Exception e) {
                         callback.onError(String.format(Locale.getDefault(),
-                            "Failed to convert authentication data to JSON: " + e
+                            "Failed to convert authentication data to JSON: %s", e
                         ));
                     }
                 },
@@ -1869,6 +2022,17 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             Loaded,
             Completed,
             Cancelled
+        }
+
+        /**
+         * Why a purchase failed before the payment UI, for the {@code reason} key of the error JSON.
+         * <p>
+         * Each name must be exactly a value's name in the Unity side's {@code XsollaPurchasingFailureReason}, which ignores
+         * any other name. A {@code USER_CANCELED} result may carry one too: its {@code Cancelled} code wins there.
+         */
+        public enum PurchaseFailureReason {
+            ProductUnavailable,
+            PurchasingUnavailable
         }
 
         @NonNull
@@ -2878,8 +3042,16 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
             }
         }
 
+        /**
+         * Encodes a failed {@link BillingResult} for the Unity side, mapping its response code to the error code.
+         * <p>
+         * A null {@code reason} (a failure after the payment UI, which the native SDK doesn't classify) is left out, and
+         * the Unity side reports the reason as unknown.
+         */
         @NonNull
-        public static String billingResultToJson(@NonNull final BillingResult billingResult) {
+        public static String billingResultToJson(
+            @NonNull final BillingResult billingResult, @Nullable final PurchaseFailureReason reason
+        ) {
             final String code;
 
             switch (billingResult.getResponseCode()) {
@@ -2900,17 +3072,33 @@ public final class XsollaStoreClientNativeAndroid implements PurchasesUpdatedLis
                     break;
             }
 
-            return createErrorJson(billingResult.getDebugMessage(), code);
+            return createErrorJson(billingResult.getDebugMessage(), code, reason);
         }
 
+        /**
+         * Encodes a purchase failure as the {@code message}/{@code code}/{@code reason} JSON the Unity side parses.
+         * <p>
+         * The message is free text (native debug messages carry server descriptions, URLs and exception texts), so it is
+         * escaped; a single unescaped quote would fail the whole parse and lose the code. The fallback strips quotes and
+         * backslashes so the code still survives.
+         */
         @NonNull
         public static String createErrorJson(
-            @NonNull final String message, @Nullable final String code
+            @NonNull final String message, @Nullable final String code, @Nullable final PurchaseFailureReason reason
         ) {
-            return String.format(Locale.getDefault(),
-                "{\"message\":\"%s\",\"code\":\"%s\"}",
-                message, code
-            );
+            try {
+                return new JSONObject()
+                    .put("message", message)
+                    .put("code", code)
+                    .putOpt("reason", reason == null ? null : reason.name())
+                    .toString();
+            } catch (JSONException e) {
+                return String.format(Locale.getDefault(),
+                    "{\"message\":\"%s\",\"code\":\"%s\"%s}",
+                    message.replace("\"", "").replace("\\", ""), code,
+                    reason == null ? "" : ",\"reason\":\"" + reason.name() + "\""
+                );
+            }
         }
 
         @Nullable

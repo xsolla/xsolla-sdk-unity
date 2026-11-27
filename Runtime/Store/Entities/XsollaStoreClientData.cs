@@ -538,6 +538,14 @@ namespace Xsolla.SDK.Store
         public string errorMessage;
 
         /// <summary>
+        /// The failure reason the platform client named in the error JSON, or null when it named none the SDK knows.
+        /// The purchasing core reports it unless <see cref="code"/> is a cancellation.
+        /// </summary>
+        [JsonProperty("reason", NullValueHandling = NullValueHandling.Ignore)]
+        [JsonConverter(typeof(XsollaStoreClientHelpers.FailureReasonConverter))]
+        internal XsollaPurchasingFailureReason? reason;
+
+        /// <summary>
         /// Initializes a new instance with error message.
         /// </summary>
         /// <param name="message">Error description.</param>

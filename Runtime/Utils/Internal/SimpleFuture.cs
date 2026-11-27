@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
+using System.Threading;
 
 namespace Xsolla.SDK.Utils
 {
@@ -43,10 +45,13 @@ namespace Xsolla.SDK.Utils
         public static ISimpleFuture<T3, E> Zip<T1, T2, T3, E>( this ISimpleFuture<T1, E> f1, ISimpleFuture<T2, E> f2, Func<T1, T2, T3> zipper)
         {
             var future = Create<T3, E>(out var promise);
+            var finished = 0;
 
+            // Both callbacks see both futures completed when the futures complete on different threads, or when both
+            // were already completed at registration; only the first may zip.
             void OnFinish()
             {
-                if (f1.isCompleted && f2.isCompleted)
+                if (f1.isCompleted && f2.isCompleted && Interlocked.CompareExchange(ref finished, 1, 0) == 0)
                 {
                     if (f1.isFailed)
                         promise.CompleteWithError(f1.TryGetError(out var error) ? error : default);
@@ -64,16 +69,48 @@ namespace Xsolla.SDK.Utils
         }
     }
 
+    /// <summary>
+    /// A future that is its own promise. Completing it runs every callback registered so far, in registration order,
+    /// also when one of them throws: the first exception propagates with its original stack once all of them have run,
+    /// and any later one is only logged.
+    /// <para/>
+    /// Safe to register on and complete from any thread: a callback registered while the future completes runs exactly
+    /// once, either with the completion or immediately on registration. Callbacks run outside the lock, so they may
+    /// register on this future or wait on threads that do.
+    /// </summary>
     internal class SimpleFutureImpl<T, E> : ISimpleFuture<T, E>, ISimplePromise<T, E>
     {
         private T value;
         private E error;
+        private bool completed;
+        private bool failed;
         
-        public bool isCompleted { get; private set; }
-        public bool isFailed { get; private set; }
+        public bool isCompleted
+        {
+            get
+            {
+                lock (gate)
+                    return completed;
+            }
+        }
+
+        public bool isFailed
+        {
+            get
+            {
+                lock (gate)
+                    return failed;
+            }
+        }
         
         private static readonly Action<T> noOpSuccess = _ => { };
         private static readonly Action<E> noOpError = _ => { };
+
+        /// <summary>
+        /// Guards <see cref="actions"/> and the completion state, so registration and completion each see the other
+        /// either entirely or not at all.
+        /// </summary>
+        private readonly object gate = new object();
 
         private List<(Action<T> onSuccess, Action<E> onError)> actions = new List<(Action<T> onSuccess, Action<E> onError)>();
         
@@ -81,56 +118,108 @@ namespace Xsolla.SDK.Utils
         
         public void Complete(T value)
         {
-            isCompleted = true;
-            isFailed = false;
-            this.value = value;
-
-            foreach (var action in actions)
+            List<(Action<T> onSuccess, Action<E> onError)> pending;
+            lock (gate)
             {
-                action.onSuccess?.Invoke(value);
+                completed = true;
+                failed = false;
+                this.value = value;
+                pending = actions;
+                actions = new List<(Action<T> onSuccess, Action<E> onError)>();
             }
-            actions.Clear();
+
+            RunCallbacks(pending, action => action.onSuccess?.Invoke(value));
         }
         
         public void CompleteWithError(E error)
         {
-            isCompleted = true;
-            isFailed = true;
-            this.error = error;
-
-            foreach (var action in actions)
+            List<(Action<T> onSuccess, Action<E> onError)> pending;
+            lock (gate)
             {
-                action.onError?.Invoke(error);
+                completed = true;
+                failed = true;
+                this.error = error;
+                pending = actions;
+                actions = new List<(Action<T> onSuccess, Action<E> onError)>();
             }
-            actions.Clear();
+
+            RunCallbacks(pending, action => action.onError?.Invoke(error));
+        }
+
+        /// <summary>
+        /// Hands every callback in <paramref name="pending"/> to <paramref name="invoke"/>, also when one throws, then
+        /// rethrows the first exception; a later one is reported to Unity as an exception instead.
+        /// <para/>
+        /// One failing callback must not cost the others their result, such as purchase deliveries held until the
+        /// catalog arrives, while its exception still reaches whoever completed the future. A later one, most likely
+        /// thrown by the app's own code, is reported whatever the SDK log level, as it would be had it escaped.
+        /// </summary>
+        private static void RunCallbacks(
+            List<(Action<T> onSuccess, Action<E> onError)> pending,
+            Action<(Action<T> onSuccess, Action<E> onError)> invoke
+        )
+        {
+            ExceptionDispatchInfo firstException = null;
+            foreach (var action in pending)
+            {
+                try
+                {
+                    invoke(action);
+                }
+                catch (Exception exception)
+                {
+                    if (firstException == null)
+                        firstException = ExceptionDispatchInfo.Capture(exception);
+                    else
+                        UnityEngine.Debug.LogException(exception);
+                }
+            }
+
+            firstException?.Throw();
         }
         
         public void OnComplete(Action<T> onSuccess, Action<E> onError)
         {
-            if (isCompleted && !isFailed)
+            bool wasCompleted;
+            bool wasFailed;
+            T completedValue;
+            E completedError;
+            lock (gate)
             {
-                onSuccess?.Invoke(value);
+                wasCompleted = completed;
+                wasFailed = failed;
+                completedValue = value;
+                completedError = error;
+                if (!wasCompleted && (onSuccess != null || onError != null))
+                    actions.Add((onSuccess ?? noOpSuccess, onError ?? noOpError));
             }
-            else if (isCompleted && isFailed)
+
+            if (wasCompleted && !wasFailed)
             {
-                onError?.Invoke(error);
+                onSuccess?.Invoke(completedValue);
             }
-            else if (onSuccess != null || onError != null)
+            else if (wasCompleted && wasFailed)
             {
-                actions.Add((onSuccess ?? noOpSuccess, onError ?? noOpError));
+                onError?.Invoke(completedError);
             }
         }
 
         public bool TryGetValue(out T value)
         {
-            value = this.value;
-            return isCompleted && !isFailed;
+            lock (gate)
+            {
+                value = this.value;
+                return completed && !failed;
+            }
         }
 
         public bool TryGetError(out E error)
         {
-            error = this.error;
-            return isCompleted && isFailed;
+            lock (gate)
+            {
+                error = this.error;
+                return completed && failed;
+            }
         }
     }
 }

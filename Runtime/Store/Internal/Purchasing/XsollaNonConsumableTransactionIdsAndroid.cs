@@ -1,4 +1,3 @@
-#if !XSOLLA_SDK_UNITY_PURCHASING_DISABLE
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -6,9 +5,11 @@ using System.Text;
 using JetBrains.Annotations;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+#if UNITY_ANDROID || UNITY_EDITOR
 using UnityEngine;
+#endif
 
-namespace Xsolla.SDK.UnityPurchasing
+namespace Xsolla.SDK.Store
 {
     /// <summary>
     /// The transaction id Unity IAP 4.x granted each purchase of a non-consumable under, kept across launches by the id
@@ -21,9 +22,9 @@ namespace Xsolla.SDK.UnityPurchasing
     /// <para/>
     /// The made-up id names the user only when the access token does: under a token that names no user every user of
     /// the device holds the SKU under the same ids, so a record would answer for the holding of another user, whose
-    /// restore Unity IAP would then drop as already granted. The store records a purchase only under a token that names
-    /// a user (see <see cref="NamesUser"/>), and not once its access token was updated after the purchase, when the
-    /// inventory it reads may be another user's.
+    /// restore Unity IAP would then drop as already granted. <see cref="XsollaPurchasingCore"/> records a purchase only
+    /// under a token that names a user (see <see cref="NamesUser"/>), and not once its access token was updated after
+    /// the purchase, when the inventory it reads may be another user's.
     /// </summary>
     internal sealed class XsollaNonConsumableTransactionIdsAndroid
     {
@@ -39,6 +40,7 @@ namespace Xsolla.SDK.UnityPurchasing
             _write = write;
         }
 
+#if UNITY_ANDROID || UNITY_EDITOR
         /// <summary>
         /// Records kept in <see cref="PlayerPrefs"/>, saved at once so a launch that is killed keeps them. The save writes
         /// out every preference of the game not saved yet as well.
@@ -56,9 +58,10 @@ namespace Xsolla.SDK.UnityPurchasing
                     PlayerPrefs.Save();
                 }
             );
+#endif
 
         /// <summary>
-        /// Records kept in <paramref name="values"/>, which outlives the store as <see cref="PlayerPrefs"/> do.
+        /// Records kept in <paramref name="values"/>, which outlives the core as the player prefs do.
         /// </summary>
         public static XsollaNonConsumableTransactionIdsAndroid InDictionary([NotNull] IDictionary<string, string> values) =>
             new XsollaNonConsumableTransactionIdsAndroid(
@@ -111,4 +114,3 @@ namespace Xsolla.SDK.UnityPurchasing
             KeyPrefix + nativeTransactionId + ":" + sku;
     }
 }
-#endif
